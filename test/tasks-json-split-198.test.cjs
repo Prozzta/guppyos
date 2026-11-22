@@ -30,12 +30,19 @@ const loadTs = require('./load-ts.cjs');
 const A = loadTs('src/main/taskArchive.ts');
 const { HiveManager } = loadTs('src/main/hive.ts');
 const cli = require('../resources/tasks-cli.cjs');
+const fsp = require('node:fs/promises');
 
 const H = 60 * 60_000;
 const NOW = Date.parse('2026-10-21T12:00:00.000Z');
 const iso = (ms) => new Date(ms).toISOString();
 const card = (id, extra = {}) => ({ id, title: `title ${id}`, status: 'todo', assignee: 'creed', priority: 'medium', ...extra });
 const old = (id, extra = {}) => card(id, { status: 'done', doneAt: iso(NOW - 72 * H), result: `[${iso(NOW - 72 * H)}] did ${id}`, ...extra });
+
+/** The rig's teardown: close the manager, wait for its reads, then delete the folder. */
+async function closeThenDelete(home, hive) {
+  hive.dispose(); await hive.drainReads();
+  fs.rmSync(home, { recursive: true, force: true, maxRetries: 5 });
+}
 
 function rig(t, tasks) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-tjs-'));
@@ -44,8 +51,8 @@ function rig(t, tasks) {
   const hotPath = path.join(root, 'tasks.json');
   if (tasks) fs.writeFileSync(hotPath, JSON.stringify({ tasks }, null, 2));
   const hive = new HiveManager(() => home);
-  t.after(async () => { hive.dispose(); await hive.drainReads(); fs.rmSync(home, { recursive: true, force: true, maxRetries: 5 }); });
-  const hot = () => JSON.parse(fs.readFileSync(hotPath, 'utf8')).tasks;
+  t.after(() => closeThenDelete(home, hive));
+  const hot =() => JSON.parse(fs.readFileSync(hotPath, 'utf8')).tasks;
   const archiveLines = () => {
     const dir = path.join(root, 'tasks-archive');
     if (!fs.existsSync(dir)) return [];
@@ -383,6 +390,58 @@ test('readers that need any card ever made read allTasks (source pins)', () => {
   assert.match(hv, /const list = this\.allTasks\(\)\.tasks;\s+let meta: Record<string, CardMeta> = \{\};/);
   // the Slack/webhook done-pollers stay on hot: their reply patch must never revive old cards
   assert.match(ix, /function pollWebhookDoneTasks\(\): void \{\s+let tasks: HiveTask\[\];\s+try \{\s+const ledger = hive\.tasks\(\)/);
+});
+
+// FLAKE-LAG-SYNC-IO-107-AFTERHOOK-ENOTEMPTY-108: an archive write (a pass, a revive) starts a
+// re-read of the archive that nobody awaits, and drainReads() does not cover it (it is not one of
+// the manager's counted reads). Here the revive's re-read is held open on a real file handle
+// until the manager's own drain has finished, so the teardown must wait for it by itself. Under
+// Electron a delete with that file open fails ENOTEMPTY; the retries cannot help, they block the
+// turn the read needs to close.
+test('teardown: the rig waits for the archive re-read a revive started before it deletes the folder', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-tjs-'));
+  const root = path.join(home, 'hive');
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(path.join(root, 'tasks.json'), JSON.stringify({ tasks: [old('OLD1'), card('LIVE')] }));
+  const hive = new HiveManager(() => home);
+  const events = [];
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  let held = null;
+  const realRead = fsp.readFile;
+  const realDrain = hive.drainReads.bind(hive);
+  // Only a read that finds the revive's tombstone on disk is held: the re-read the revive started,
+  // never a read the revive itself waits for (those come before the tombstone).
+  const revivedOnDisk = (p) => { try { return fs.readFileSync(p, 'utf8').includes('"revived"'); } catch { return false; } };
+  try {
+    assert.deepEqual(await hive.archivePass(NOW), ['OLD1']);
+    // The pass's own re-read is over (joined, then one turn for the manager to take its result).
+    await A.readArchiveTextsAsync(root);
+    await new Promise((r) => setImmediate(r));
+    await hive.__revalidateArchiveForTests();
+    fsp.readFile = function (p, ...rest) {
+      if (held || !String(p).startsWith(home) || !/\.jsonl$/.test(String(p)) || !revivedOnDisk(p)) return realRead.call(this, p, ...rest);
+      held = (async () => {
+        const fh = await fsp.open(p, 'r');
+        try { await gate; return await fh.readFile(...rest); } finally { await fh.close(); events.push('archive read closed'); }
+      })();
+      return held;
+    };
+    // Let go only once the manager's own drain has resolved.
+    hive.drainReads = () => realDrain().then(() => { setImmediate(release); });
+    assert.ok(await hive.patchTask('OLD1', { notes: 'back' }), 'the revive lands');
+    for (let i = 0; held === null && i < 500; i++) await new Promise((r) => setTimeout(r, 20));
+    assert.ok(held, 'the re-read the revive started opened the archive file');
+    assert.deepEqual(events, [], 'the re-read is still open when the test body ends');
+    await closeThenDelete(home, hive);
+    events.push('folder deleted');
+  } finally {
+    release();
+    fsp.readFile = realRead;
+    if (held) await held.catch(() => undefined);
+    fs.rmSync(home, { recursive: true, force: true }); // a red run leaves no folder behind
+  }
+  assert.deepEqual(events, ['archive read closed', 'folder deleted']);
 });
 
 test('the pass runs at guard start and hourly, and stops with the guard', async (t) => {
