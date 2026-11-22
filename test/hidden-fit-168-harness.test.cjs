@@ -15,9 +15,11 @@ const { runScenario } = require('./electron-harness/run.cjs');
 
 const scenario = join(__dirname, 'electron-harness', 'scenarios', 'hidden-fit.tsx');
 
-test('a PtyTerminalView inside display:none never resizes its pty; it does once shown', async () => {
+test('a PtyTerminalView inside display:none never resizes its pty; it does once shown', async (t) => {
+  // The scenario waits for the after-show resize itself; this timeoutMs is the only bound on it.
   const r = await runScenario(scenario, { timeoutMs: 60_000 });
   assert.equal(r.ok, true, `scenario failed: ${r.error ?? ''}`);
+  t.diagnostic(`display:block -> observer callback with a size ${r.showToObserverMs} ms, -> resizePty ${r.showToSendMs} ms`);
   assert.equal(r.afterMount, 0, 'no pty resize on a hidden mount');
   assert.equal(r.afterFontChange, 0, 'no pty resize on a font-size change while hidden');
   assert.ok(r.shown.length >= 1, `the pty is resized once the host has a size (got ${JSON.stringify(r.shown)})`);
