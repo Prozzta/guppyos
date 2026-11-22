@@ -24,7 +24,7 @@ function run(args) {
   const sandbox = createSandbox('rr164dump-');
   return new Promise((resolve, reject) => {
     const child = spawn(electron, [join(__dirname, 'electron-harness', 'crash-dump-main.cjs'), '--sandbox', sandbox, ...args], {
-      cwd: join(__dirname, '..'), env: { ...process.env, MUNDER_DEV: '' }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true
+      cwd: join(__dirname, '..'), env: require('./electron-harness/electron-bin.cjs').appEnv({ ...process.env, MUNDER_DEV: '' }), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true
     });
     const bornMs = Date.now();
     let out = ''; let err = '';

@@ -36,8 +36,8 @@ function runOne(name) {
   return new Promise((done) => {
     const child = spawn(require('./electron-bin.cjs').harnessElectron(), [main, userData, result], {
       cwd: root,
-      env: { ...process.env, MUNDER_DEV: '', ELECTRON_ENABLE_LOGGING: '1',
-        APPDATA: join(jail, 'AppData/Roaming'), LOCALAPPDATA: join(jail, 'AppData/Local'), USERPROFILE: jail, HOME: jail },
+      env: require('./electron-bin.cjs').appEnv({ ...process.env, MUNDER_DEV: '', ELECTRON_ENABLE_LOGGING: '1',
+        APPDATA: join(jail, 'AppData/Roaming'), LOCALAPPDATA: join(jail, 'AppData/Local'), USERPROFILE: jail, HOME: jail }),
       stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true
     });
     let err = '';

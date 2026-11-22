@@ -84,7 +84,9 @@ function runScenario(scenario, opts = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(electron, args, {
       cwd: root,
-      env: {
+      // appEnv (HARNESS-RUN-AS-NODE-ENV-LEAK-108): the child is a real Electron app, so it must
+      // not inherit the Electron leg's ELECTRON_RUN_AS_NODE. It wraps the whole env, opts.env too.
+      env: require('./electron-bin.cjs').appEnv({
         ...process.env,
         // A test's own variables for this run only (HARNESS_SOURCE_OVERRIDES for a mutant census).
         // Spread FIRST (Jim N1): they can never undo the isolation keys below.
@@ -93,7 +95,7 @@ function runScenario(scenario, opts = {}) {
         // the app's own sockets: this is a throwaway process, not an instance.
         MUNDER_DEV: '',
         ELECTRON_ENABLE_LOGGING: '1'
-      },
+      }),
       stdio: ['ignore', 'pipe', 'pipe']
     });
 
@@ -146,7 +148,7 @@ function runIpcOrder(opts = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(electron, args, {
       cwd: root,
-      env: { ...process.env, MUNDER_DEV: '' },
+      env: require('./electron-bin.cjs').appEnv({ ...process.env, MUNDER_DEV: '' }),
       stdio: ['ignore', 'pipe', 'pipe']
     });
     let out = '';

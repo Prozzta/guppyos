@@ -141,3 +141,90 @@ test('MUTANT CENSUS (run.cjs): every mutant applies exactly once and is killed',
     });
   }
 });
+
+/**
+ * HARNESS-RUN-AS-NODE-ENV-LEAK-108: a harness child is a REAL Electron app, whatever runs the test.
+ *
+ * The suite's Electron leg runs each test file as 'ELECTRON_RUN_AS_NODE=1 electron.exe --test'.
+ * The launchers spread process.env into the child, so the child started as plain Node, had no
+ * 'app', and died at isolate-paths.cjs (app.setPath) with 'harness produced no result (exit 1)'.
+ * These cells set the key in THIS process for one run, so plain node shows the defect too.
+ */
+const RUN_AS_NODE = 'ELECTRON_RUN_AS_NODE';
+const { appEnv } = require('./electron-harness/electron-bin.cjs');
+
+/** Run fn with process.env[RUN_AS_NODE] = '1', then put back exactly what was there. */
+async function withRunAsNodeSet(fn) {
+  const had = Object.prototype.hasOwnProperty.call(process.env, RUN_AS_NODE);
+  const was = process.env[RUN_AS_NODE];
+  process.env[RUN_AS_NODE] = '1';
+  try { return await fn(); } finally {
+    if (had) process.env[RUN_AS_NODE] = was; else delete process.env[RUN_AS_NODE];
+  }
+}
+
+test('appEnv: a copy of the env without ELECTRON_RUN_AS_NODE; the caller\'s object is left alone', () => {
+  const given = { PATH: 'p', [RUN_AS_NODE]: '1', MUNDER_DEV: '' };
+  const out = appEnv(given);
+  assert.deepEqual(out, { PATH: 'p', MUNDER_DEV: '' });
+  assert.deepEqual(given, { PATH: 'p', [RUN_AS_NODE]: '1', MUNDER_DEV: '' }, 'the input is not edited');
+  assert.equal(RUN_AS_NODE in appEnv({ PATH: 'p' }), false, 'nothing is added when the key is absent');
+  const mine = withRunAsNodeSet(() => appEnv());
+  return mine.then((env) => {
+    assert.equal(RUN_AS_NODE in env, false, 'the default is process.env, without the key');
+    assert.equal(env.PATH, process.env.PATH);
+  });
+});
+
+test('a scenario run still reports when this process has ELECTRON_RUN_AS_NODE=1 (the Electron leg)', async () => {
+  const root = privateRoot();
+  try {
+    const r = await withRunAsNodeSet(() => run.runScenario(
+      path.join(__dirname, 'electron-harness', 'scenarios', 'render-capabilities.ts'), { tempRoot: root, timeoutMs: 60_000 }));
+    assert.equal(r.ok, true, `the child ran the scenario as an Electron app: ${r.error ?? ''}`);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a test\'s own opts.env cannot put ELECTRON_RUN_AS_NODE back into the harness child', async () => {
+  const root = privateRoot();
+  try {
+    const r = await run.runScenario(
+      path.join(__dirname, 'electron-harness', 'scenarios', 'render-capabilities.ts'),
+      { tempRoot: root, timeoutMs: 60_000, env: { [RUN_AS_NODE]: '1' } });
+    assert.equal(r.ok, true, `the child ran the scenario as an Electron app: ${r.error ?? ''}`);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** Files that take the harness binary's path but never start a child with it. */
+const TAKES_THE_PATH_ONLY = ['test/electron-fuses.test.cjs', 'test/electron-view-self-heal-198.test.cjs', 'test/tools/claims90-search.cjs'];
+/** What a launcher must show: appEnv (a real app), an explicit delete (a real app), or the key set to '1' (Node on purpose). */
+const SAYS_WHICH = /\bappEnv\(|delete env\.ELECTRON_RUN_AS_NODE\b|ELECTRON_RUN_AS_NODE: '1'/;
+
+test('THE TREE: every file that launches the harness Electron binary says whether its child is an app or Node', () => {
+  const testDir = __dirname;
+  const users = [];
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (e.name === 'node_modules' || e.name.startsWith('.')) continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) walk(full);
+      else if (e.name.endsWith('.cjs') && /\bharnessElectron\(/.test(fs.readFileSync(full, 'utf8'))) {
+        users.push(`test/${path.relative(testDir, full).split(path.sep).join('/')}`);
+      }
+    }
+  };
+  walk(testDir);
+  const self = 'test/electron-harness-sandbox.test.cjs';
+  const definesIt = 'test/electron-harness/electron-bin.cjs';
+  for (const exempt of TAKES_THE_PATH_ONLY) assert.ok(users.includes(exempt), `${exempt} no longer names harnessElectron: drop it from TAKES_THE_PATH_ONLY`);
+  const launchers = users.filter((f) => f !== self && f !== definesIt && !TAKES_THE_PATH_ONLY.includes(f));
+  assert.ok(launchers.includes('test/electron-harness/run.cjs') && launchers.length >= 5,`the walk found the launchers: ${launchers.join(', ')}`);
+  const silent = launchers.filter((f) => !SAYS_WHICH.test(readSource(f)));
+  assert.deepEqual(silent, [],
+    'A LAUNCHER OF THE HARNESS ELECTRON BINARY THAT MAY HAND ITS CHILD ELECTRON_RUN_AS_NODE: under the Electron leg the child starts as plain Node and never reports. '
+    + 'Wrap the child env in appEnv() (test/electron-harness/electron-bin.cjs), or set the key to \'1\' when Node is meant.');
+});
