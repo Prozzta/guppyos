@@ -22,7 +22,24 @@ const { consoleNode, KEY } = require('./tools/console-node.cjs');
 // either leg). The Electron leg links a real console node (consoleNode), never electron.exe.
 const NODE_LEG = { versions: { node: process.versions.node } };
 const ELECTRON_LEG = { versions: { node: process.versions.node, electron: '45.0.0' } };
+// The Electron-leg rigs hard-link the console node. On the Electron leg an rmSync of any link of an exe is
+// EPERM while any process runs that image, under any name, and other suite files run the real console
+// node in parallel. So this file links a PRIVATE COPY that only its own cells (and their --version child)
+// run: one copy per file, in its own temp root, removed in after(). KEY names the copy before any consoleNode().
+const SHARED_NODE = fs.realpathSync(consoleNode().file);
+const PRIVATE_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'rignode108-node-'));
+const PRIVATE_NODE = path.join(PRIVATE_ROOT, path.basename(SHARED_NODE));
+fs.copyFileSync(SHARED_NODE, PRIVATE_NODE);
+const savedKey = process.env[KEY];
+process.env[KEY] = PRIVATE_NODE;
+test.after(() => {
+  if (savedKey === undefined) delete process.env[KEY]; else process.env[KEY] = savedKey;
+  fs.rmSync(PRIVATE_ROOT, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+});
 const electronParent = () => ({ ...process.env, [KEY]: consoleNode().file });
+const sameId = (a, b) => { const x = fs.statSync(a), y = fs.statSync(b); return x.ino === y.ino && x.dev === y.dev && x.size === y.size; };
+// binding control: a cell that linked the shared console node again fails here by name, not by EPERM later
+const notShared = (file) => assert.ok(!sameId(file, SHARED_NODE), `${file} is a link of the shared console node ${SHARED_NODE}, not this file's private copy`);
 
 function withExec(exe, sharedRoot, fn) {
   const savedExec = process.execPath;
@@ -61,6 +78,7 @@ test('RIG-NODE-DIR-SHARED-108: a node-leg rig still passes the isolation check a
   const s2 = sandbox(2);
   const parent2 = electronParent(); // before withExec: consoleNode() reads the real process.execPath
   const env2 = withExec(exes['electron.exe'], shared, () => isolation.rigEnv(s2, parent2, ELECTRON_LEG));
+  notShared(path.join(env2.RIG_NODE_DIR, 'node.exe'));
   // 3. the next node-leg rig: its node dir must hold node only
   const s3 = sandbox(3);
   const env3 = withExec(exes['node.exe'], shared, () => isolation.rigEnv(s3, process.env, NODE_LEG));
@@ -77,7 +95,8 @@ test('RIG-NODE-DIR-SHARED-108: the Electron leg first, then the node leg (a fres
   const { shared, exes, sandbox } = setup(t);
   const s1 = sandbox(1);
   const parent1 = electronParent(); // before withExec: consoleNode() reads the real process.execPath
-  withExec(exes['electron.exe'], shared, () => isolation.rigEnv(s1, parent1, ELECTRON_LEG));
+  const env1 = withExec(exes['electron.exe'], shared, () => isolation.rigEnv(s1, parent1, ELECTRON_LEG));
+  notShared(path.join(env1.RIG_NODE_DIR, 'node.exe'));
   const s2 = sandbox(2);
   const env = withExec(exes['node.exe'], shared, () => isolation.rigEnv(s2, process.env, NODE_LEG));
   assert.equal(isolation.checkIsolation(env, s2, { who: 'node leg' }), true);

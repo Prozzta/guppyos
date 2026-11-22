@@ -19,6 +19,20 @@ const { consoleNode, KEY } = require('./tools/console-node.cjs');
 
 const ELECTRON_LEG = { versions: { node: process.versions.node, electron: '45.0.0' } };
 const NAME = isolation.nodeExeName(ELECTRON_LEG);
+// The rig hard-links the console node. On the Electron leg an rmSync of any link of an exe is EPERM while
+// any process runs that image, under any name, and other suite files run the real console node in
+// parallel. So this file's cells link a PRIVATE COPY that only they (and their --version child) run: one
+// copy per file, in its own temp root, removed in after(). KEY names the copy before any consoleNode().
+const SHARED_NODE = fs.realpathSync(consoleNode().file);
+const PRIVATE_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'rigelec108-node-'));
+const PRIVATE_NODE = path.join(PRIVATE_ROOT, path.basename(SHARED_NODE));
+fs.copyFileSync(SHARED_NODE, PRIVATE_NODE);
+const savedKey = process.env[KEY];
+process.env[KEY] = PRIVATE_NODE;
+test.after(() => {
+  if (savedKey === undefined) delete process.env[KEY]; else process.env[KEY] = savedKey;
+  fs.rmSync(PRIVATE_ROOT, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+});
 const realNode = () => fs.realpathSync(consoleNode().file);
 const electronParent = (extra = {}) => ({ ...process.env, [KEY]: realNode(), ...extra });
 
@@ -52,6 +66,8 @@ function setup(t) {
 }
 
 const sameId = (a, b) => { const x = fs.statSync(a), y = fs.statSync(b); return x.ino === y.ino && x.dev === y.dev && x.size === y.size; };
+// binding control: a cell that linked the shared console node again fails here by name, not by EPERM later
+const notShared = (file) => assert.ok(!sameId(file, SHARED_NODE), `${file} is a link of the shared console node ${SHARED_NODE}, not this file's private copy`);
 
 test('RIG-ELECTRON-LEG-NOT-ISOLATED-108: the Electron leg passes the unchanged isolation check; its node dir is exactly the console node', (t) => {
   const { electronRig } = setup(t);
@@ -61,6 +77,7 @@ test('RIG-ELECTRON-LEG-NOT-ISOLATED-108: the Electron leg passes the unchanged i
   // (b) the dir holds node only, and that node is the console node the leg chose (one hard link)
   assert.deepEqual(fs.readdirSync(env.RIG_NODE_DIR), [NAME]);
   assert.ok(sameId(path.join(env.RIG_NODE_DIR, NAME), realNode()), 'the node dir holds the console node');
+  notShared(path.join(env.RIG_NODE_DIR, NAME));
   // (c) the stubs' bare `node` resolves on the rig PATH, to the rig's node dir
   const hits = env.PATH.split(path.delimiter).map((d) => path.join(d, NAME)).filter((p) => { try { return fs.statSync(p).isFile(); } catch { return false; } });
   assert.ok(hits.length > 0, `no ${NAME} on the rig PATH: ${env.PATH}`);
@@ -77,6 +94,7 @@ test('RIG-ELECTRON-LEG-NOT-ISOLATED-108: a same-version dir holding a different 
   assert.notEqual(path.resolve(env.RIG_NODE_DIR).toLowerCase(), plain.toLowerCase());
   assert.ok(path.basename(env.RIG_NODE_DIR).startsWith(`${path.basename(plain)}-`), env.RIG_NODE_DIR);
   assert.ok(sameId(path.join(env.RIG_NODE_DIR, NAME), realNode()), 'the leg runs the node it chose');
+  notShared(path.join(env.RIG_NODE_DIR, NAME));
   assert.equal(fs.readFileSync(path.join(plain, NAME), 'utf8'), 'another install of the same version');
   assert.equal(isolation.checkIsolation(env, s, { who: 'Electron leg, keyed dir' }), true);
   // the keyed dir's node replaced in place: remove the link name only (never write through the hard link)
@@ -116,6 +134,7 @@ test('RIG-ELECTRON-LEG-NOT-ISOLATED-108: teeth: electron.exe is never the rig no
 test('RIG-ELECTRON-LEG-NOT-ISOLATED-108: (f) the check still refuses a stray binary beside the Electron leg\'s node', (t) => {
   const { electron, electronRig } = setup(t);
   const { s, env } = electronRig();
+  notShared(path.join(env.RIG_NODE_DIR, NAME));
   fs.copyFileSync(electron, path.join(env.RIG_NODE_DIR, 'electron.exe'));
   assert.throws(() => isolation.checkIsolation(env, s, { who: 'planted' }), /the node dir holds more than node: .*electron\.exe, node(\.exe)?/);
 });
