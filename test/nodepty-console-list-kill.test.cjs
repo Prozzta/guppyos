@@ -238,7 +238,7 @@ test('harness, inbox conhost: a child that exited by itself and is still on its 
   assert.equal(c.past, 'ran past the harness script', `control: the child ran on with its console gone (childBytes said: ${c.result})`);
   assert.equal(c.rootExitedAtClose, false, `control: the child was still running when node-pty's kill was entered, so this cell is about the console leave and not the exit (${order})`);
   assert.deepEqual(c.cleanupKills, ['held, running'], "control: and it ran to the end of the case (the driver's own hold ended it)");
-  assert.deepEqual(c.consoleAfter, [], `the child is gone after the close (its console holds ${JSON.stringify(c.consoleAfter)})`);
+  assert.deepEqual(c.consoleAfter, [], `the child is off the owner's console after the close (its console holds ${JSON.stringify(c.consoleAfter)})`);
 });
 test('harness, inbox conhost: a child that never exits after the kill by pid fails by name, its terminal is not closed, and the file can still end', async () => {
   const c = await kase('harnessNeverExits');
