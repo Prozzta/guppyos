@@ -154,19 +154,27 @@ async function mustC(t, { M = HJ, preload = PRELOAD, probe = 'recorder' } = {}) 
   step('b queued');
   assert.equal(b.lock.acquire('c', H, 'npm test', 'hc', false).allow, false);
   step('c denied');
-  // ONE process listing for both kills (MUSTC-RECORDER-CELL-COST-108, Jim 6c9a93): the two trees
-  // are disjoint, and taken here both are listed while both still run, as each was before.
+  // ONE listing, ONE lookup, ONE stop for both trees (MUSTC-RECORDER-CELL-COST-108, Jim 6c9a93 and
+  // 601cb6): the two trees are disjoint, and taken here both are listed while both still run.
+  const starts0 = own.powershellStarts();
   const rows = own.processTable();
-  const listing = () => rows;
-  step('process listing (shared by both kills)');
-  killTree(wb, { table: listing });
-  step('killTree(b wrapper)');
+  step('process listing');
+  const bTree = own.ownTree(rows, { pid: wb.child.pid, bornMs: wb.bornMs }).tree;    // parent first
+  const aTree = own.ownTree(rows, { pid: run.child.pid, bornMs: run.bornMs }).tree;  // parent first
+  // The stop order, built PER TREE (never by reversing the combined list, which would kill a's file
+  // child before a and a before b): b's tree deepest first, then a's root, then a's children.
   // INT102-TEST-FOLLOWUPS (Jim, INT-1.1.102 MUST C): the lease holder (the node --test runner)
   // dies BEFORE its file child. Killed after, it could see the child die and exit on its own, and
   // its preload's release would log lease-end, not lease-gone.
+  const order = [...bTree.slice().reverse(), ...aTree];
+  assert.deepEqual([order[bTree.length - 1]?.pid, order[bTree.length]?.pid], [wb.child.pid, run.child.pid],
+    `the stop order is b's tree deepest first, b's wrapper last of it, then a's root first: ${JSON.stringify(order.map((r) => r.pid))}`);
   assert.equal(run.child.exitCode, null, 'the lease holder is still running when it is killed (a crash, not an exit)');
-  killTree(run, { rootFirst: true, table: listing });
-  step('killTree(a lease holder, rootFirst)');
+  // killVerified drops what is gone or reused (one fresh lookup) and hands the rest on reversed;
+  // the stop takes them back in `order`, and stopIfSame checks each again right before it stops it.
+  own.killVerified(order, { kill: (same) => { const ok = new Set(same); own.stopIfSame(order.filter((r) => ok.has(r))); } });
+  step('one stop (b deepest-first, then a root-first)');
+  t.diagnostic(`MUSTC STARTS powershell starts for the kill: ${own.powershellStarts() - starts0} (listing + lookup + stop = 3)`);
   await wb.done;
   step('b wrapper closed');
   await run.done;
