@@ -118,34 +118,55 @@ function recorder(M) {
   };
 }
 
+/**
+ * MUSTC-RECORDER-CELL-COST-108 (measure only): one t.diagnostic per step, so a slow cell names the
+ * step that spent the time. It times; it changes no step, bound or assert.
+ */
+function stepClock(t) {
+  const t0 = Date.now(); let last = t0;
+  return (step) => { const now = Date.now(); t.diagnostic(`MUSTC STEP ${step}: ${now - last} ms (cell +${now - t0} ms)`); last = now; };
+}
+
 /** E2E MUST C. probe: 'recorder' (the parallel cell) or 'real' (the serial perf lane). */
 async function mustC(t, { M = HJ, preload = PRELOAD, probe = 'recorder' } = {}) {
   if (process.platform !== 'win32') { t.skip('the process listing is Windows-only'); return; }
   if (probe !== 'recorder' && probe !== 'real') throw new Error(`mustC: probe must be 'recorder' or 'real', not ${probe}`);
+  const step = stepClock(t);
   const rec = probe === 'recorder' ? recorder(M) : null;
   const b = rec ? await broker(t, M, { probe: rec.probe, roots: () => [] })
     : await broker(t, M, { probe: () => M.probeProcesses(require('../tools/ps-env.cjs').psEnv()), roots: () => [] });
   if (rec) rec.watch(b.lock);
+  step(`broker up (${probe})`);
   // A crashed lease holder: killed outright, so its exit handler never runs.
   const run = start([process.execPath, '--test', 'sleeper.test.cjs'], { url: b.url('a'), preload });
   t.after(() => { if (run.child.exitCode === null) try { killTree(run); } catch { /* gone */ } });   // it never ends on its own
   await until(() => b.lock.snapshot().length === 1, 15_000, 'the lease');
+  step('lease up');
   // b's wrapper waits behind it; c is denied at PreToolUse and queued after b.
   const wb = start([process.execPath, 'wrapper.cjs'], { url: b.url('b'), agent: 'b', preload });
   await until(() => b.lock.queueSnapshot().waiters.some((w) => w.agentId === 'b'), 15_000, "b's wait");
+  step('b queued');
   assert.equal(b.lock.acquire('c', H, 'npm test', 'hc', false).allow, false);
+  step('c denied');
   killTree(wb);
+  step('killTree(b wrapper)');
   // INT102-TEST-FOLLOWUPS (Jim, INT-1.1.102 MUST C): the lease holder (the node --test runner)
   // dies BEFORE its file child. Killed after, it could see the child die and exit on its own, and
   // its preload's release would log lease-end, not lease-gone.
   assert.equal(run.child.exitCode, null, 'the lease holder is still running when it is killed (a crash, not an exit)');
   killTree(run, { rootFirst: true });
-  await wb.done; await run.done;
+  step('killTree(a lease holder, rootFirst)');
+  await wb.done;
+  step('b wrapper closed');
+  await run.done;
+  step('a lease holder closed');
   const t0 = Date.now();
   await b.lock.scan();
+  step('scan');
   // Every assert names the lock's path, so a flake says which way the slot was freed.
   const trail = () => `${JSON.stringify(b.logs.map((x) => [x.action, x.agentId, x.reason].filter(Boolean).join(':')))} notes=${JSON.stringify(b.notes)} scan+${Date.now() - t0}ms`;
   await until(() => b.notes.includes('c'), 15_000, "c's notice").catch((e) => { throw new Error(`${e.message}: ${trail()}`); });
+  step("c's notice");
   assert.ok(b.logs.some((x) => x.action === 'lease-gone' && x.agentId === 'a'), `A CRASHED TEST RUN'S LEASE IS FREED BY THE SCAN: ${trail()}`);
   assert.ok(b.logs.some((x) => x.action === 'queue-dropped' && x.agentId === 'b' && x.reason === 'waiter-gone'), `A KILLED WAITING WRAPPER LEAVES THE QUEUE: ${trail()}`);
   assert.deepEqual(b.notes, ['c'], `THE NEXT QUEUED AGENT GETS HEAVY SLOT FREE WITHIN ONE SCAN: ${trail()}`);
