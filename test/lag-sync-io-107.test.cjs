@@ -571,6 +571,10 @@ test('teardown: closeThenDelete waits for the archive re-read a revive started b
   hive.ensureHive();
   fs.writeFileSync(path.join(hive.root(), 'tasks.json'), JSON.stringify({ tasks: [card('L1'), oldDone('O1')] }), 'utf8');
   assert.deepEqual(await hive.archivePass(), ['O1']);
+  // The pass started a re-read of its own. It is over (joined, then one turn for the manager to
+  // take its result) before the revive below, so the revive starts a new one.
+  await archive.readArchiveTextsAsync(hive.root());
+  await new Promise((r) => setImmediate(r));
   await hive.__revalidateArchiveForTests();
   const events = [];
   let release;
@@ -578,8 +582,11 @@ test('teardown: closeThenDelete waits for the archive re-read a revive started b
   let held = null;
   const realRead = fsp.readFile;
   const realDrain = hive.drainReads.bind(hive);
+  // Only a read that finds the revive's tombstone on disk is held: that is the re-read the revive
+  // started, never a read the revive itself waits for (those come before the tombstone).
+  const revivedOnDisk = (p) => { try { return fs.readFileSync(p, 'utf8').includes('"revived"'); } catch { return false; } };
   fsp.readFile = function (p, ...rest) {
-    if (held || !/\.jsonl$/.test(String(p)) || !under(home, p)) return realRead.call(this, p, ...rest);
+    if (held || !/\.jsonl$/.test(String(p)) || !under(home, p) || !revivedOnDisk(p)) return realRead.call(this, p, ...rest);
     held = (async () => {
       const fh = await fsp.open(p, 'r');
       try { await gate; return await fh.readFile(...rest); } finally { await fh.close(); events.push('archive read closed'); }
