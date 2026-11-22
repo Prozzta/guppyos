@@ -737,7 +737,7 @@ async function main() {
       const hh = rig.heldHook.get(id);
       rig.heldHook.delete(id);
       const held = hh ? hh.held : [];
-      for (const a of held) inboxWake?.onHook(...a);
+      for (const a of held) f.inboxWake.onHook(...a);
       return { released: held.length };
     },
     releaseProviderStatus: ({ id }) => {
