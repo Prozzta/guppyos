@@ -148,8 +148,13 @@ class FakeAgent {
     // and scenario.echoLagAfterMs (FLAKE-ISO-ECHO-LAG-191) is the lag of every chunk after them
     // (the erase's own lag, apart from the staged text's).
     // Always IN ORDER: a later chunk is never processed before an earlier, delayed one.
+    // MAIL-RIG-G1-NO-ECHO-108 echo-hold seam: with scenario.echoHold the stub reads NO stdin chunk
+    // (so it echoes nothing) until the 'echo-release' cue, then reads them all in order. A hold on
+    // an event, not a lag in ms: a test can state "the keys are not on the screen yet" as a fact.
+    this.echoHeld = this.scenario.echoHold ? [] : null;
     let lagged = 0; let lastDue = 0;
     process.stdin.on('data', (d) => {
+      if (this.echoHeld) { this.echoHeld.push(d); return; }
       const lag = Number(this.scenario.echoLagMs) || 0;
       const limit = this.scenario.echoLagChunks === undefined ? Infinity : Number(this.scenario.echoLagChunks);
       const after = Number(this.scenario.echoLagAfterMs) || 0;
@@ -328,6 +333,14 @@ class FakeAgent {
       case 'hang': this.hung = true; this.writeComposer(); return;   // J-LF2: the driver's stubsIdle skips a hung stub
       case 'unhang': this.hung = false; this.writeComposer(); return;
       case 'echo-lag': this.scenario = { ...this.scenario, echoLagMs: Number(cue.ms) || 0, echoLagAfterMs: Number(cue.ms) || 0 }; return;   // ISO seam: the load ends
+      // MAIL-RIG-G1-NO-ECHO-108: end the echo hold `afterMs` from now; chunks that arrive meanwhile
+      // join the same queue, so the order holds.
+      case 'echo-release': {
+        const q = this.echoHeld;
+        if (!q) return;
+        setTimeout(() => { this.echoHeld = null; for (const d of q) this.onInput(d); }, Number(cue.afterMs) || 0);
+        return;
+      }
       case 'interrupt': this.interrupt('cue'); return;
       // LOAD-FLAKES-176 (Jim A1): from now on every hook and turn start waits this long first (a
       // loaded machine, on purpose, for one phase of a test; RIG_SLOW_STUB_MS does it from spawn).
