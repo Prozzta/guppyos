@@ -159,7 +159,7 @@ const MUTANTS = [
     killer: 'blind', dies: /THE BLIND HOUR IS LOGGED LOUDLY/ },
   { name: 'the blind hour is logged but the hold is kept', edits: [["        this.release(h.agentId, 'ttl'); continue;\n      }\n      h.touched = t;", "        h.touched = t; continue;\n      }\n      h.touched = t;"]],
     killer: 'blind', dies: /THE BLIND HOUR EXPIRES THE HOLD/ },
-  { name: 'a scan does not record the sighting', edits: [['      if (busy.has(h.agentId)) { h.misses = 0; h.seenRunning = true; h.seenAt = t; continue; }', '      if (busy.has(h.agentId)) { h.misses = 0; h.seenRunning = true; continue; }']],
+  { name: 'a scan does not record the sighting', edits: [['      if (busy.has(h.agentId) || this.heldJobRunning(h)) { h.misses = 0; h.seenRunning = true; h.seenAt = t; continue; }', '      if (busy.has(h.agentId) || this.heldJobRunning(h)) { h.misses = 0; h.seenRunning = true; continue; }']],
     killer: 'seenRenews', dies: /A HOLD SEEN RUNNING EVERY HOUR IS RENEWED EVERY HOUR/ },
   { name: 'a sighting at the renewal instant does not count (strict <=)', edits: [[COND, '      if (!h.seenRunning || h.seenAt === null || h.seenAt <= h.touched) {']],
     killer: 'seenRenews', dies: /A SIGHTING AT THE RENEWAL INSTANT COUNTS FOR THE NEXT HOUR/ },
