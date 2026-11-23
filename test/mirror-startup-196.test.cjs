@@ -209,9 +209,16 @@ test('MIRROR-GUARD-CPU-TIME: the default clock is the thread\'s CPU: a waited sl
 test('MIRROR-GUARD-CPU-TIME: the computing-slice judge goes red on a half-scale, a stuck and a wall clock', () => {
   const real = M.threadCpuMs;
   assert.equal(typeof real, 'function');
-  assert.throws(() => judgeComputingSlice(computingSliceRun(() => real() * 0.5, 30000)), /THE CLOCK IS NOT AT CPU SCALE/, 'a half-scale clock');
-  assert.throws(() => judgeComputingSlice(computingSliceRun(() => 0, 300)), /A COMPUTING SLICE WAS NOT CHARGED/, 'a clock stuck at 0 (and no hang)');
-  assert.throws(() => judgeComputingSlice(computingSliceRun(() => performance.now(), 30000)), /A WAITED SLICE WAS CHARGED/, 'a wall clock');
+  // FLAKE-MIRROR-GUARD-JUDGE-HALFSCALE-MISSED-108: when the judge does NOT go red, the failure names what it
+  // read (calls, stepMs, ratio), so a miss under load shows its step/true instead of a bare label.
+  const expectRed = (clock, capMs, re, label) => {
+    const run = computingSliceRun(clock, capMs);
+    const seen = `the judge did NOT go red: calls ${JSON.stringify(run.calls)}, stepMs ${run.stepMs}, ratio ${(run.stepMs / run.calls[1]).toFixed(2)}`;
+    assert.throws(() => judgeComputingSlice(run), re, `${label}: ${seen}`);
+  };
+  expectRed(() => real() * 0.5, 30000, /THE CLOCK IS NOT AT CPU SCALE/, 'a half-scale clock');
+  expectRed(() => 0, 300, /A COMPUTING SLICE WAS NOT CHARGED/, 'a clock stuck at 0 (and no hang)');
+  expectRed(() => performance.now(), 30000, /A WAITED SLICE WAS CHARGED/, 'a wall clock');
 });
 
 // Jim SHOULD (deb435f8): in Electron main, process.cpuUsage sums EVERY thread of the browser process
