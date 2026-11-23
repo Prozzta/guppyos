@@ -568,7 +568,8 @@ function runNodeTest({ rel, extraArgs = [], label, spawn, cwd, timeoutMs, isTTY,
       : `ended by ${isoMs(endedMs)}, when node --test returned (no exit row)`;
     err(`[test-runner] ${label}  pid ${l.pid}: born ${isoMs(l.bornMs)} (bornMs ${l.bornMs}); ${end}: ${l.file}`);
   }
-  if (kept) err(`[test-runner] ${label}records kept (copied, not moved) in ${keptDir}: ${kept.map((f) => path.basename(f)).join(', ')}`);
+  if (kept && kept.length) err(`[test-runner] ${label}records kept (copied, not moved) in ${keptDir}: ${kept.map((f) => path.basename(f)).join(', ')} (never removed by the runner; delete it once read)`);
+  else if (kept) err(`[test-runner] ${label}no record file existed to keep in ${keptDir}`);
   for (const h of hung) {
     const how = h.by === 'backstop' ? `the runner's backstop killed it at ${backstopMs(timeoutMs)} ms`
       : h.by === 'watchdog' ? 'it never finished; the watchdog killed it' : 'it never finished';
@@ -611,13 +612,16 @@ function isoMs(ms) { try { return new Date(ms).toISOString(); } catch { return S
 
 /**
  * RUNNER-KEEP-RECORDS-ON-ABNORMAL-FILE-EXIT-108: copy (never move) each record that exists into
- * `dir`; returns the paths copied. The originals stay for the normal cleanup.
+ * `dir`; returns the paths copied. The originals stay for the normal cleanup. The kept folder is
+ * evidence: the runner never removes it (whoever reads it deletes it).
  */
 function copyRecords(dir, files) {
-  fs.mkdirSync(dir, { recursive: true });
   const copied = [];
   for (const f of files) {
-    try { fs.copyFileSync(f, path.join(dir, path.basename(f))); copied.push(f); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+    if (!fs.existsSync(f)) continue; // no record, no folder: an empty keep leaves nothing behind
+    fs.mkdirSync(dir, { recursive: true });
+    fs.copyFileSync(f, path.join(dir, path.basename(f)));
+    copied.push(f);
   }
   return copied;
 }
