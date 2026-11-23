@@ -222,15 +222,43 @@ class Rig {
     }
     const diags = await call('diags', {});
     lines.push('wake: ' + (Array.isArray(diags) ? diags : []).filter((d) => d.agentId === agentId && !['enter', 'facts', 'schedule'].includes(d.stage)).map((d) => `${d.stage}:${d.why ?? d.outcome ?? d.event ?? ''}`).join(' '));
+    // FLAKE-MAILRIG-C4-BOOT-SENTINEL-108: a PTY exit is named with its code and times, and the stub's pid.
+    const exits = (Array.isArray(diags) ? diags : []).filter((d) => d.agentId === agentId && d.stage === 'pty-exit');
+    if (exits.length) lines.push(this.exitFacts(agentId, exits[exits.length - 1]));
     const pt = await call('ptyTrace', { id: agentId });
     if (pt && !pt.error) lines.push(`pty: last output ${pt.lastOutputSim ? pt.sim - pt.lastOutputSim : 'never'} ms ago on the simulated clock (real: ${pt.lastOutputReal - pt.clockMovedReal} ms after the clock last moved); after the boot sentinel: ${pt.chunks.length ? pt.chunks.map((c) => `${pt.sim - c.sim} ms ago ${c.bytes}b ${JSON.stringify(c.head)}`).join(' ; ') : 'nothing'}`);
     const outs = await call('outcomes', {});
     for (const o of (Array.isArray(outs) ? outs : [])) if (o.agentId === agentId) lines.push('outcome ' + o.cls + ' ' + JSON.stringify(o.outcome));
     for (const r of this.transcript(agentId)) {
       if (r.kind === 'hook') lines.push(`stub hook ${r.event} transport=${r.transport} exit=${r.exit} ms=${r.ms ?? null} t=${r.t ?? null} response=${r.response ? JSON.stringify(r.response).slice(0, 120) : null}`);
-      else if (['prompt', 'context', 'turn-end', 'cue', 'exit', 'host-gone'].includes(r.kind)) lines.push(`stub ${r.kind} ${JSON.stringify({ t: r.t, event: r.event, ids: r.ids, how: r.how, cue: r.cue?.cue })}`);
+      else if (['prompt', 'context', 'turn-end', 'cue', 'exit', 'host-gone'].includes(r.kind)) lines.push(`stub ${r.kind} ${JSON.stringify({ t: r.t, event: r.event, ids: r.ids, how: r.how, cue: r.cue?.cue, code: r.code })}`);
     }
     return lines.join('\n');
+  }
+
+  /**
+   * FLAKE-MAILRIG-C4-BOOT-SENTINEL-108: one line for a PTY exit, with what is needed to match it
+   * against an outside kill: the exit code the host's exit handler got (none when the host itself
+   * tore the PTY down), the exit time in real ms, and the stub's pid with its start time. The
+   * CreationDate is read from the process table only while the pid is alive (a PTY can end with its
+   * stub still running); for a dead pid the line says so and gives `born`, the stub's own start
+   * time (own-procs: at or a little after its CreationDate).
+   */
+  exitFacts(agentId, row) {
+    const iso = (ms) => (Number.isFinite(ms) && ms > 0 ? new Date(ms).toISOString() : 'unknown');
+    const num = (name) => { try { return Number(fs.readFileSync(path.join(this.stubDir(agentId), name), 'utf8')); } catch { return 0; } };
+    const pid = num('pid');
+    const born = num('born');
+    const alive = pid > 0 && pidAlive(pid);
+    let created = 'not readable (the pid is gone)';
+    if (alive) {
+      try {
+        const now = own.lookupPids([pid])[0];
+        created = now ? `${now.created} (${iso(now.created)}, ${now.name})` : 'not readable (no process table row)';
+      } catch (e) { created = `not readable (${String(e.message).split('\n')[0].slice(0, 160)})`; }
+    }
+    const code = row.exitCode === null || row.exitCode === undefined ? 'none (torn down by the host, not by its own exit)' : row.exitCode;
+    return `pty-exit: exit code ${code}; at ${row.real ?? 'unknown'} (${iso(row.real)}) real, ${row.at} on the simulated clock; ${row.ptyId}; stub pid ${pid || 'unknown'} ${alive ? 'ALIVE' : 'gone'}; CreationDate ${created}; born ${born || 'unknown'} (${iso(born)}) by the stub's own clock`;
   }
 
   // ——— the fake CLIs ———
@@ -310,10 +338,18 @@ class Rig {
    * delivered after setup's 40 s advance (seen under full-suite load) was stamped "now" and the
    * first reconcile beat refused the wake as lifecycle-unknown-not-quiescent. The timeout is a
    * failure (with diagnostics), never a pass.
+   *
+   * FLAKE-MAILRIG-C4-BOOT-SENTINEL-108: a PTY that EXITED during boot is a failure too, at once.
+   * The host forgets a PTY at its exit, so bootSeen is false from then on (also when the sentinel
+   * did arrive first) and the wait could only run out its 60 s. `stop` is asked only after a
+   * bootSeen that was not true, so it can never turn a failure into a pass.
    */
   async settleBoot(ids) {
     for (const id of ids) {
-      await waitFor(() => this.call('bootSeen', { id }), { what: `${id}'s boot-complete sentinel in the host's PTY stream`, timeoutMs: 60_000, intervalMs: 50, diag: () => this.diagnose(id) });
+      await waitFor(() => this.call('bootSeen', { id }), {
+        what: `${id}'s boot-complete sentinel in the host's PTY stream`, timeoutMs: 60_000, intervalMs: 50, diag: () => this.diagnose(id),
+        stop: async () => ((await this.call('hasPty', { id }, 5_000)) === false ? `${id}'s PTY exited during boot, so its boot-complete sentinel can no longer arrive` : null),
+      });
     }
   }
 
@@ -516,18 +552,28 @@ async function startRig(t) {
   return rig;
 }
 
-/** Poll `fn` until it returns a truthy value; fail naming `what` after `timeoutMs`. */
-async function waitFor(fn, { timeoutMs = 20_000, intervalMs = 60, what = 'condition', diag = null } = {}) {
+/**
+ * Poll `fn` until it returns a truthy value; fail naming `what` after `timeoutMs`.
+ * `stop` (optional, async): asked after each poll that did not hold; a string it returns is why the
+ * condition can NEVER hold now, and the wait fails with it at once (with `diag`) instead of running
+ * out its time. It only ever fails the wait: a `stop` that throws or returns nothing changes nothing.
+ */
+async function waitFor(fn, { timeoutMs = 20_000, intervalMs = 60, what = 'condition', diag = null, stop = null } = {}) {
   const until = Date.now() + timeoutMs;
+  // `diag`: an async dump appended to the failure (e.g. () => rig.diagnose(agentId)).
+  const dump = async () => { if (!diag) return ''; try { return `\n${await diag()}`; } catch (e) { return `\n(diagnostics failed: ${e})`; } };
   let last;
   while (Date.now() < until) {
     try { last = await fn(); } catch (e) { last = e; }
     if (last && !(last instanceof Error)) return last;
+    if (stop) {
+      let why = null;
+      try { why = await stop(); } catch { why = null; }
+      if (typeof why === 'string' && why) throw new Error(`${why} (stopped waiting for ${what})${await dump()}`);
+    }
     await sleep(intervalMs);
   }
-  // `diag`: an async dump appended to the failure (e.g. () => rig.diagnose(agentId)).
-  let extra = '';
-  if (diag) { try { extra = `\n${await diag()}`; } catch (e) { extra = `\n(diagnostics failed: ${e})`; } }
+  const extra = await dump();
   throw new Error(`timed out after ${timeoutMs} ms waiting for ${what}${last instanceof Error ? ` (last error: ${last.message})` : ''}${extra}`);
 }
 
