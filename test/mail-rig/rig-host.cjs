@@ -469,7 +469,7 @@ async function buildFloor() {
   // with the default (a tab / voice kill bounces); only the PTY's own exit passes 'pty-exit'.
   function teardownPty(ptyId, exitCode, archiveReason = 'explicit') {
     const agentId = ptyToAgent.get(ptyId);
-    diags.push({ stage: 'pty-exit', ptyId, agentId: agentId ?? null, exitCode: exitCode ?? null, at: clock.now() });
+    diags.push({ stage: 'pty-exit', ptyId, agentId: agentId ?? null, exitCode: exitCode ?? null, at: clock.now(), real: Date.now() });
     if (!agentId) return;
     ptyToAgent.delete(ptyId);
     ptyProvider.delete(ptyId);
