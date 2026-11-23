@@ -222,6 +222,30 @@ test('C3 a text-only wake turn with a budget overflow: what never surfaced is re
   for (const id of ids) assert.equal(seen.filter((x) => x === id).length, 1, `${id} once`);
 });
 
+// FLAKE-MAILRIG-C4-BOOT-SENTINEL-108: in a full Node leg, C4's cl-1 lost its PTY during boot. The
+// host's bootSeen is false for good once the PTY is torn down, so the boot barrier polled a thing
+// that could no longer happen for its whole 60 s, and the failure did not name the exit code. Here
+// the stub ends itself (the crash cue) before the barrier runs: the barrier must FAIL at once, and
+// its text must carry what a later capture needs to name the killer: the exit code, the pty-exit
+// time in real ms, and the stub's pid with its start time.
+test('C4-boot: a PTY that exits during boot fails the boot barrier at once, naming the exit code and the times', T, async (t) => {
+  const rig = await startRig(t);
+  const s = { id: 'cl-1', flavour: 'claude', scenario: { manualTurns: true } };
+  const r = await rig.call('spawn', s);
+  assert.equal(r.ok, true, `spawn: ${r.error}`);
+  await rig.waitReady(s);
+  rig.cue('cl-1', { cue: 'crash', code: 7 });
+  await waitFor(async () => (await rig.call('hasPty', { id: 'cl-1' })) === false, { what: "the host's exit handler for cl-1's PTY" });
+  let err = null;
+  try { await rig.settleBoot(['cl-1']); } catch (e) { err = e; }
+  assert.ok(err, 'a PTY that exited during boot is a failure, never a pass');
+  assert.doesNotMatch(err.message, /timed out after/, 'no wait for a sentinel that can no longer arrive');
+  assert.match(err.message, /cl-1's PTY exited during boot/);
+  assert.match(err.message, /pty-exit: exit code 7; at \d{13} \(\d{4}-\d\d-\d\dT[\d:.]+Z\) real/, 'the exit code and the real time, to the ms');
+  assert.match(err.message, /stub pid \d+ gone; CreationDate not readable \(the pid is gone\); born \d{13} \(/, 'the stub pid and its start time');
+  assert.match(err.message, /stub exit \{[^}]*"code":7/, "the stub's own exit record");
+});
+
 // Unit tests: mail-epochs "§11.4: Claude StopFailure …" and "§11.4: an interrupt (no Stop), then the next UserPromptSubmit while the lifecycle is IDLE …".
 test('C4 StopFailure is an abnormal end (re-surfaced with the marker); an interrupt, then the next UserPromptSubmit, closes the epoch and re-surfaces in that same turn', T, async (t) => {
   const rig = await startRig(t);
