@@ -48,7 +48,7 @@ async function closeThenDelete(home, hive) {
   hive.dispose(); await hive.drainReads();
   const root = hive.root();
   if (root) await A.readArchiveTextsAsync(root).catch(() => null);
-  fs.rmSync(home, { recursive: true, force: true, maxRetries: 5 });
+  fs.rmSync(home, { recursive: true, force: true });
 }
 
 function rig(t, tasks) {
@@ -403,8 +403,8 @@ test('readers that need any card ever made read allTasks (source pins)', () => {
 // re-read of the archive that nobody awaits, and drainReads() does not cover it (it is not one of
 // the manager's counted reads). Here the revive's re-read is held open on a real file handle
 // until the manager's own drain has finished, so the teardown must wait for it by itself. Under
-// Electron a delete with that file open fails ENOTEMPTY; the retries cannot help, they block the
-// turn the read needs to close.
+// Electron a delete with that file open fails ENOTEMPTY. The rig's delete takes no retries: they
+// could not help (they block the turn the read needs to close) and would hide a leaked handle.
 test('teardown: the rig waits for the archive re-read a revive started before it deletes the folder', async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-tjs-'));
   const root = path.join(home, 'hive');
