@@ -87,8 +87,8 @@ const lostFixture = () => ({
   ].join('\n'),
   'ev.jsonl.starts.kills': '',
 });
-const runWith = (files, extra) => {
-  const e = []; const order = [];
+const runWith = (files, extra, order = []) => {
+  const e = [];
   runner.runNodeTest({ rel: ['x'], label: '', spawn: () => ({ status: 1 }), cwd: '.', timeoutMs: 5, isTTY: false, env: {},
     eventsFile: 'ev.jsonl', readFile: (f) => files[f] || '', removeFile: (f) => order.push(['rm', f]), watchdog: () => ({ stop: () => {} }),
     backstop: () => ({ opt: '', env: {}, stop: () => {} }), err: (l) => e.push(l), now: () => 9000, ...extra });
@@ -96,7 +96,9 @@ const runWith = (files, extra) => {
 };
 
 test('a file that ended without exiting: its records are COPIED to a kept folder before the cleanup, and its pid, birth and end are printed', () => {
-  const { errs, order } = runWith(lostFixture(), { keepRecords: (dir, files) => { order.push(['keep', dir, files]); return files; } });
+  // The keep writes into an order made here: the one runWith returns is not bound yet while the run calls the keep.
+  const order = [];
+  const { errs } = runWith(lostFixture(), { keepRecords: (dir, files) => { order.push(['keep', dir, files]); return files; } }, order);
   const keeps = order.filter((o) => o[0] === 'keep');
   assert.equal(keeps.length, 1, `THE RECORDS ARE KEPT, ONCE:\n${JSON.stringify(order)}`);
   assert.equal(keeps[0][1], path.join('.', 'kept-ev.jsonl'), 'the kept folder sits beside the records, under a name the cleanup never removes');
