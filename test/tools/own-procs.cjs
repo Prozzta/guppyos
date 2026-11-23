@@ -19,6 +19,7 @@
  * - just before a kill, the pid must still have the name and CreationDate it was found with.
  * Not on win32: no process table, so nothing can be verified and nothing is killed.
  */
+const fs = require('node:fs');
 const { execFileSync } = require('node:child_process');
 const { psEnv } = require('./ps-env.cjs');
 
@@ -81,10 +82,21 @@ function ownTree(rows, rec, leadMs = ORPHAN_LEAD_MS) {
   if (r) {
     if (r.created > rec.bornMs) return { root: null, tree: [], stranger: r, older: false };
     if (rec.name && r.name.toLowerCase() !== String(rec.name).toLowerCase()) return { root: null, tree: [], stranger: r, older: true };
-    return { root: r, tree: [r, ...treeOf(rows, r)] };
+    return { root: r, tree: ruled([r, ...treeOf(rows, r)], 'own-tree') };
   }
   const tree = treeOf(rows, { pid: rec.pid, created: rec.bornMs - leadMs });
-  return { root: null, tree: Number.isFinite(rec.goneBy) ? cutAfter(tree, rec.goneBy) : tree };
+  return { root: null, tree: ruled(Number.isFinite(rec.goneBy) ? cutAfter(tree, rec.goneBy) : tree, 'orphan') };
+}
+
+/**
+ * FLAKE-OWN-PROCS-POWERSHELL-EXIT-NEG1-EMPTY-108: which ownTree rule took a row ('own-tree': under a live root of
+ * ours; 'orphan': the child of a root that is gone), kept beside the rows so no row changes shape. Only the stops
+ * journal reads it; a row no ownTree call returned is 'direct' there (the caller passed it itself).
+ */
+const ruleOf = new WeakMap();
+function ruled(tree, rule) {
+  for (const r of tree) ruleOf.set(r, rule);
+  return tree;
 }
 
 /** The tree without the rows created after `t` (in a treeOf tree a child is never older than its parent, so
@@ -167,7 +179,7 @@ ${script}`;
     // FLAKE-OWN-PROCS-POWERSHELL-EXIT-NEG1-EMPTY-108: a run that had a child names it and the wall time around the
     // call, so the Windows PowerShell event log (engine start 400 / stop 403) can be matched to this one process.
     const child = Number.isInteger(err.pid) ? ` [own-procs powershell child pid=${err.pid} started=${new Date(t0).toISOString()} ended=${new Date(t1).toISOString()}]` : '';
-    const why = `[own-procs powershell #${starts} failed after ${t1 - t0} ms: status=${err.status ?? null} signal=${err.signal ?? null} code=${err.code ?? null} stderr=${JSON.stringify(text(err.stderr).slice(0, 400))} stdout=${JSON.stringify(text(err.stdout).slice(0, 200))}]${child}`;
+    const why = `[own-procs powershell #${starts} failed after ${t1 - t0} ms: status=${err.status ?? null} signal=${err.signal ?? null} code=${err.code ?? null} stderr=${JSON.stringify(text(err.stderr).slice(0, 400))} stdout=${JSON.stringify(text(err.stdout).slice(0, 200))}]${child}${child ? stopsNaming(err.pid) : ''}`;
     try { err.message = `${err.message} ${why}`; } catch { /* read-only message */ }
     err.powershellWhy = why;
     throw err;
@@ -207,7 +219,46 @@ exit 0`;
 /** Stop each row's pid, but only if it still has that name and CreationDate (checked here, again). `run` is for tests. */
 function stopIfSame(rows, run = powershell) {
   if (process.platform !== 'win32' || !rows.length) return;
+  noteStops(rows);
   run(stopScript(rows));
+}
+
+/**
+ * FLAKE-OWN-PROCS-POWERSHELL-EXIT-NEG1-EMPTY-108: the stops journal. Stop-Process -Force ends its target with exit
+ * code 4294967295 and leaves nothing in the target's output, and a kill made that way was in no record (the
+ * preload's <starts>.kills holds only process.kill and taskkill). So each row handed to a stop script is one line
+ * in <starts>.stops: { t, pid, ppid, name, created, rule, file, by }. A row means HANDED to a stop script, not
+ * stopped: the script checks the name and CreationDate again and may skip. The path is the one
+ * file-backstop-preload.cjs keeps on `process` for a test file of a run; anywhere else this does nothing.
+ * Append-only; a journal that cannot be written or read never changes a stop or an error.
+ */
+const BACKSTOP_KEY = Symbol.for('guppy.file-backstop');
+function stopsJournal() {
+  const b = process[BACKSTOP_KEY];
+  return b && typeof b === 'object' && typeof b.stops === 'string' && b.stops ? { stops: b.stops, file: typeof b.file === 'string' ? b.file : '' } : null;
+}
+function noteStops(rows) {
+  try {
+    const j = stopsJournal();
+    if (!j) return;
+    const t = Date.now();
+    fs.appendFileSync(j.stops, rows.map((r) => `${JSON.stringify({ t, pid: r.pid, ppid: r.ppid ?? null, name: r.name, created: r.created, rule: ruleOf.get(r) || 'direct', file: j.file, by: process.pid })}\n`).join(''));
+  } catch { /* the stop itself still runs */ }
+}
+/** For a failed run's line: the journal rows that carry the child's pid, or that none of N does ('' outside a run). */
+function stopsNaming(pid) {
+  try {
+    const j = stopsJournal();
+    if (!j) return '';
+    let rows = [];
+    try {
+      rows = fs.readFileSync(j.stops, 'utf8').split(/\r?\n/).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter((r) => r && typeof r === 'object');
+    } catch { /* no journal yet: no stop was handed over */ }
+    const hit = rows.filter((r) => r.pid === pid);
+    if (!hit.length) return ` [own-procs stops: none of ${rows.length} rows names pid ${pid}; a row means handed to a stop script, not stopped]`;
+    const at = (t) => { try { return new Date(t).toISOString(); } catch { return String(t); } };
+    return ` [own-procs stops: pid ${pid} was handed to a stop script (handed, not proven stopped): ${hit.slice(0, 5).map((r) => `${r.name} created=${r.created} ppid=${r.ppid} rule=${r.rule} by ${r.file} (pid ${r.by}) at ${at(r.t)}`).join('; ')}${hit.length > 5 ? `; and ${hit.length - 5} more` : ''}]`;
+  } catch { return ''; }
 }
 
 module.exports = { runPowershell, ORPHAN_LEAD_MS, BIRTH_SLACK_MS, bornNow, parseRows, sameProcess, childrenOf, treeOf, ownTree, ownTreeOrThrow, cutAfter, stillOurs, readRec, killVerified, killOwnTree, processTable, lookupPids, stopScript, stopIfSame, powershellStarts };
