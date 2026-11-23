@@ -976,15 +976,22 @@ test('the late-member check fails a missing stamp, an early release, a late rele
   assert.throws(() => assertLateMember({ ...base, relAt: null, stillIn: { error: null, code: 0, ms: 40, rows: 1, pids: [7], unparsed: 0 } }), /THE SLOT IS FREED WITHIN 2 S OF THE LATE MEMBER'S EXIT \(not freed 6 s after the member's end stamp; .*in the job at the deadline: list exit 0 in 40 ms, 1 rows \[7\]/);
 });
 
-test('LIVE: the late-member check goes red on a slot freed while the member runs, and on a member that leaves a stamp out', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
+// Three cells, one live run each: a timeout then names which run it was.
+test('LIVE: the late-member check goes red on a slot freed while the member runs', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
   // test mutant: a product that frees the slot 1.5 s in (about the shell's exit), with the late member still running
   const early = await liveRelease(t, { lateMember: true, releaseEarly: 1_500 });
   t.diagnostic(`freed early: ${early.relAt - early.member.endAt} ms from the member's end stamp; ${memberText(early)}`);
   assert.throws(() => assertLateMember(early), /A MEMBER THAT JOINED AFTER THE SNAPSHOT KEEPS THE SLOT \(freed \d+ ms before the member's end stamp/);
-  // a member with no start stamp: the launcher leaves when the member has died, and the red is the stamp's, at once
+});
+
+test('LIVE: the late-member check goes red on a member with no start stamp', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
+  // the launcher leaves when the member has died, and the red is the stamp's, at once
   const noStart = await liveRelease(t, { lateMember: { only: 'end' } });
   assert.throws(() => assertLateMember(noStart), /THE LATE MEMBER WROTE ITS START STAMP/);
-  // a member with no end stamp: the wait stops at the cap from its start stamp, and the red is the stamp's
+});
+
+test('LIVE: the late-member check goes red on a member with no end stamp', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
+  // the wait stops at the cap from its start stamp, and the red is the stamp's
   const noEnd = await liveRelease(t, { lateMember: { only: 'start' } });
   t.diagnostic(`no end stamp: gave up ${Date.now() - noEnd.member.startAt} ms after the start stamp; ${memberText(noEnd)}`);
   assert.throws(() => assertLateMember(noEnd), /THE LATE MEMBER WROTE ITS END STAMP/);

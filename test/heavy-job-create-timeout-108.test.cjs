@@ -467,7 +467,9 @@ test('LIVE: a helper slow to start (past the request timeout) still holds the jo
   const lag = rel ? rel.ts - exitAt : null;
   const trail = rows.filter((x) => x.kind === 'heavy-cpu').map((x) => `${x.ts - exitAt}ms ${x.action}${x.what ? ' ' + x.what : ''}${x.held !== undefined ? ' held=' + x.held : ''}`).join(', ');
   assert.equal(rows.find((r) => r.action === 'wrap').held, true, `A COLD START IS NOT A FAILED CREATE: THE JOB IS HELD (${trail})`);
-  // The same bar as the sister cell heavy-lock-release-lag-197 (lagMs < 5 s).
+  // This job has no late member, so the shell's exit is the job's exit and the bar is taken from it.
+  // (The sister late-member cell in heavy-lock-release-lag-197 once had this 5 s too; it now clocks
+  // its release from the member's own end stamp.)
   assert.ok(lag !== null && lag >= 0 && lag < 5_000,
     `THE SLOT IS FREED WITHIN 5 S OF THE JOB'S EXIT (${lag === null ? 'not freed 6 s after it' : `freed ${lag} ms after`}; ${trail})`);
   assert.equal(rel.reason, 'job-exit');
