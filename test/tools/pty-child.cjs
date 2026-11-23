@@ -19,6 +19,13 @@
  * what the app frees when a terminal exits by itself: PtyManager's exit path calls no kill and leaves
  * the worker and the input socket (PTY-NATURAL-EXIT-NO-KILL-LEAK). A test that claims to cover the
  * app's own teardown must go through PtyManager, not through this helper.
+ *
+ * FLAKE-ONBINARY-DROP-PTY-CHILD-TIMEOUT-ELECTRON-108, the record. Two clocks end a call that got no
+ * bytes: the child's own 3 s (from its start) and this helper's 5 s (from the spawn). A red named
+ * only the clock that won. The three errors of those clocks ('timed out', 'did not answer',
+ * 'exited N') now carry a record line: when each step was seen in ms since the spawn, when the child
+ * says it started, what it had read, and the longest stall of this process. It records only: no
+ * clock, bound or order of the call is changed by it.
  */
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -35,12 +42,20 @@ const { holdRoot, rootHandoff } = loadTs('src/main/procIdentity.ts');
  */
 const TEARDOWN_CAP_MS = 8000;
 
+// For the record: both lines carry the child's own start (performance.timeOrigin, wall-clock ms), and
+// TIMEOUT says how many stdin bytes the child had read by then (counted by a listener of its own).
 const CHILD = [
   "process.stdin.setRawMode?.(true); process.stdin.resume();",
-  "process.stdout.write('READY:' + (process.stdout.isTTY === true && process.stdin.isTTY === true) + '\\n');",
+  "let stdinBytes = 0; process.stdin.on('data', (data) => { stdinBytes += data.length; });",
+  "process.stdout.write('READY:' + (process.stdout.isTTY === true && process.stdin.isTTY === true) + ' t0=' + performance.timeOrigin + '\\n');",
   "process.stdin.once('data', (data) => { process.stdout.write('BYTES:' + JSON.stringify([...data]) + '\\n'); process.exit(0); });",
-  "setTimeout(() => { process.stdout.write('TIMEOUT\\n'); process.exit(2); }, 3000);"
+  "setTimeout(() => { process.stdout.write('TIMEOUT t0=' + performance.timeOrigin + ' stdin=' + stdinBytes + '\\n'); process.exit(2); }, 3000);"
 ].join(' ');
+
+/** The record's stall probe: an interval of this length, whose longest gap between two ticks is kept. */
+const RECORD_TICK_MS = 100;
+/** childBytes calls of this process so far: the record says which one a red was. */
+let calls = 0;
 
 /** electron.exe, by name or because this process is one. */
 function isElectronExe(file) {
@@ -170,7 +185,13 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
   if (isElectronExe(file)) assert.equal(env.ELECTRON_RUN_AS_NODE, '1', `${file} runs as Node only (ELECTRON_RUN_AS_NODE=1 in its env)`);
   assert.equal(host === 'openconsole' || host === 'inbox', true, `host is 'openconsole' or 'inbox', not ${JSON.stringify(host)}`);
   const inbox = process.platform === 'win32' && host === 'inbox';
+  const call = ++calls;
   return new Promise((resolve, reject) => {
+    // The record's two zero points, taken just before the spawn: wall clock (to place the child's
+    // timeOrigin) and this process's monotonic clock (every stamp is ms since it).
+    const spawnWall = Date.now();
+    const spawnAt = performance.now();
+    const at = () => Math.round(performance.now() - spawnAt);
     const proc = pty.spawn(file, ['-e', `${prelude}${CHILD}`], {
       name: 'xterm-256color', cols: 120, rows: 24, cwd: process.cwd(), env,
       // NODEPTY-CONSOLE-LIST-KILL-SIBLINGS: as the app spawns every terminal (PtyManager.spawn,
@@ -194,17 +215,60 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
     let output = '';
     let ended = false;
     let wrote = false;
-    const timer = setTimeout(() => finish(new Error('PTY child did not answer')), 5000);
+    // ---- the record (see the file header). Stamps are ms since the spawn; null is "not seen". ----
+    const stamp = { first: null, ready: null, write: null, flushed: null, timeout: null, bytes: null, exit: null, exitCode: null };
+    // node-pty's write takes no callback. Its input socket's queue is read instead: a length of 0
+    // after the write says the socket's own write callback has run. Read at each tick and each chunk,
+    // so the stamp can be up to one tick late. Windows only (no such socket elsewhere).
+    const inSocket = proc._agent?.inSocket ?? null;
+    const noteFlushed = () => {
+      if (stamp.write !== null && stamp.flushed === null && inSocket && inSocket.writableLength === 0) stamp.flushed = at();
+    };
+    const gap = { ms: 0, endedAt: null };
+    let lastTick = at();
+    const noteGap = () => {
+      const now = at();
+      if (now - lastTick > gap.ms) { gap.ms = now - lastTick; gap.endedAt = now; }
+      lastTick = now;
+    };
+    const ticker = setInterval(() => { noteGap(); noteFlushed(); }, RECORD_TICK_MS);
+    const record = () => {
+      const show = (v) => (v === null ? 'none' : String(v));
+      const ready = /READY:\w+ t0=([\d.]+)/.exec(output);
+      const timeout = /TIMEOUT t0=([\d.]+) stdin=(\d+)/.exec(output);
+      const origin = timeout ? Number(timeout[1]) : ready ? Number(ready[1]) : null;
+      const hex = Buffer.isBuffer(input) ? input.toString('hex') : Buffer.from(String(input), 'latin1').toString('hex');
+      return '\n  record, ms since the spawn:'
+        + ` call ${call} in this process, input ${Buffer.isBuffer(input) ? 'Buffer' : typeof input} ${hex};`
+        + ` first chunk ${show(stamp.first)}; READY seen ${show(stamp.ready)}; write issued ${show(stamp.write)};`
+        + ` write flushed ${show(stamp.flushed)}${inSocket ? ` (input socket: ${inSocket.bytesWritten} B written, ${inSocket.writableLength} B queued)` : ' (no input socket to read)'};`
+        + ` TIMEOUT seen ${show(stamp.timeout)}; BYTES seen ${show(stamp.bytes)}; exit ${show(stamp.exit)} code ${show(stamp.exitCode)};`
+        + ` child start ${origin === null ? 'none (no READY or TIMEOUT line with its timeOrigin)' : `${Math.round(origin - spawnWall)} (its timeOrigin ${origin}, from its ${timeout ? 'TIMEOUT' : 'READY'} line)`};`
+        + ` child stdin at its TIMEOUT ${timeout ? `${timeout[2]} B` : 'none (no TIMEOUT line)'};`
+        + ` largest gap of the ${RECORD_TICK_MS} ms interval ${gap.ms} ms, ended at ${show(gap.endedAt)}`;
+    };
+    // An error of one of the two clocks. Its record is added when the call settles (seal), not here:
+    // the child's exit and the rest of its TIMEOUT line come after the chunk that names the error.
+    const clocked = new WeakSet();
+    const named = (text) => { const e = new Error(text); clocked.add(e); return e; };
+    const seal = (e) => {
+      if (clocked.has(e)) { clocked.delete(e); e.message += record(); }
+      return e;
+    };
+    const timer = setTimeout(() => finish(named('PTY child did not answer')), 5000);
     /** No close: the failure is named, and the worker is ended here so the test file can still end. */
     const refuse = (why, error) => {
-      const named = new Error(`PTY teardown: ${why}${error ? `; after: ${error.message}` : ''}`);
-      const done = () => { releaseHold(); reject(named); };
+      const refused = new Error(`PTY teardown: ${why}${error ? `; after: ${seal(error).message}` : ''}`);
+      const done = () => { releaseHold(); reject(refused); };
       worker.terminate().then(done, done);
     };
     function finish(error, value) {
       if (ended) return;
       ended = true;
       clearTimeout(timer);
+      // The stall still open now counts too: a tick that was due did not run before this.
+      noteGap();
+      clearInterval(ticker);
       if (!inbox) { close(error, value); return; }
       // NODEPTY-CONSOLE-LIST-KILL-SIBLINGS: on the inbox conhost node-pty's kill ends every process
       // on the console of the child's pid. An electron.exe child is on THIS test file's console, the
@@ -232,7 +296,7 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
       try { proc.kill(); } catch { /* child already exited */ }
       // The hold goes after the last kill that names the pid: node-pty's kill lists the console
       // from a helper it forks, so not before the teardown has settled.
-      if (!workerGone) { releaseHold(); error ? reject(error) : resolve(value); return; }
+      if (!workerGone) { releaseHold(); error ? reject(seal(error)) : resolve(value); return; }
       // Settle only once the terminal is torn down: a kill that did not run fails HERE, by name,
       // instead of leaving a thread that keeps the test file from ending.
       let watchdog;
@@ -240,23 +304,31 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
         watchdog = setTimeout(() => rej(new Error(
           'PTY teardown: the conout worker of the terminal never exited, so the kill did not run'
           + ' (node-pty holds kill() back until a first data chunk; armEarlyKill runs it at once)'
-          + (error ? `; after: ${error.message}` : ''))), TEARDOWN_CAP_MS);
+          + (error ? `; after: ${seal(error).message}` : ''))), TEARDOWN_CAP_MS);
       })]).then(
-        () => { error ? reject(error) : resolve(value); },
+        () => { error ? reject(seal(error)) : resolve(value); },
         (stuck) => worker.terminate().then(() => reject(stuck))   // named red, and the file still ends
       ).finally(() => { clearTimeout(watchdog); releaseHold(); });
     }
     proc.onData((data) => {
+      if (stamp.first === null) stamp.first = at();
       output += data;
+      if (stamp.ready === null && output.includes('READY')) stamp.ready = at();
+      noteFlushed();
       const hit = /BYTES:(\[[^\n]*\])/.exec(output);
+      if (hit && stamp.bytes === null) stamp.bytes = at();
       // Asserted, not assumed: the child itself says its stdout and stdin are the console.
       if (hit && !output.includes('READY:true')) finish(new Error(`PTY child is not on the console (its stdout/stdin isTTY is not true): ${output}`));
       if (hit) finish(null, JSON.parse(hit[1]));
-      if (output.includes('TIMEOUT')) finish(new Error('PTY child timed out'));
-      if (!wrote && output.includes('READY')) { wrote = true; proc.write(input); }
+      if (output.includes('TIMEOUT')) {
+        if (stamp.timeout === null) stamp.timeout = at();
+        if (!ended) finish(named('PTY child timed out'));
+      }
+      if (!wrote && output.includes('READY')) { wrote = true; proc.write(input); stamp.write = at(); }
     });
     proc.onExit(({ exitCode }) => {
-      if (!/BYTES:/.test(output)) finish(new Error(`PTY child exited ${exitCode}: ${output}`));
+      if (stamp.exit === null) { stamp.exit = at(); stamp.exitCode = exitCode; }
+      if (!ended && !/BYTES:/.test(output)) finish(named(`PTY child exited ${exitCode}: ${output}`));
     });
   });
 }

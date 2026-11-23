@@ -106,7 +106,9 @@ test('ONBINARY-DROP: a PTY child that is not on the console fails by name and le
   try {
     // Two names for the one failure, whichever clock is first: the child's own 3 s timer (counted from
     // its start, which is slow on a loaded machine) or the helper's 5 s wait for an answer.
-    await assert.rejects(run, { message: /^PTY child (exited 2: $|did not answer$)/ }, 'no READY reached the PTY');
+    // Each name is still the whole first line (after 'exited 2: ' comes the child's output, which is
+    // empty). The line after it is the helper's record, which both clocks' errors carry.
+    await assert.rejects(run, { message: /^PTY child (exited 2: |did not answer)\n {2}record, ms since the spawn: / }, 'no READY reached the PTY');
     let t;
     await Promise.race([exited, new Promise((_, rej) => {
       t = setTimeout(() => rej(new Error('the conout worker of the terminal never exited: the kill did not run (node-pty waits for a first data chunk, and this child sends none)')), 8000);
@@ -139,4 +141,44 @@ test('ONBINARY-DROP: a child that answers but says its stdout is no TTY is refus
   } finally {
     await worker.terminate();
   }
+});
+
+// FLAKE-ONBINARY-DROP-PTY-CHILD-TIMEOUT-ELECTRON-108. A 'PTY child timed out' red said only that the
+// child's own clock had won, not where the time went. The helper's error now carries a record, and
+// this cell pins every field of it on a real child that times out.
+// How the child is made to time out, in this cell only: its prelude drops the script's one-shot stdin
+// listener (the byte counter of the record still reads), and makes the child's own timer 250 ms.
+// host 'inbox': it starts the child at once. On the bundled OpenConsole the helper's child starts about
+// 3 s after the spawn, and which of the two clocks wins there is what the record is for, so a cell on
+// that host could pin only one of the two names.
+test("ONBINARY-DROP: a 'PTY child timed out' red carries the record of where the time went", { skip: process.platform !== 'win32' }, async (t) => {
+  const node = consoleNode();
+  t.diagnostic(`PTY child: ${node.file} ${node.version} (from ${node.from})`);
+  const prelude = "{ const once = process.stdin.once; process.stdin.once = function (name, ...rest) { return name === 'data' ? this : once.call(this, name, ...rest); };"
+    + ' const real = setTimeout; globalThis.setTimeout = (fn) => real(fn, 250); }';
+  let message;
+  await assert.rejects(childBytes(X10_HIGH_COLUMN, { file: node.file, host: 'inbox', prelude }), (e) => { message = e.message; return true; });
+  t.diagnostic(message);
+  const lines = message.split('\n');
+  assert.equal(lines[0], 'PTY child timed out', 'the name is unchanged, and alone on the first line');
+  assert.equal(lines.length, 2, 'the record is one line after the name');
+  const record = lines[1];
+  const FIELDS = [
+    ['the head, and which call it was (the input says which terminal of a cell)', /^ {2}record, ms since the spawn: call \d+ in this process, input string 1b5b4d208521; /],
+    ['the first chunk', /; first chunk \d+; /],
+    ['READY seen', /; READY seen \d+; /],
+    ['the write issued', /; write issued \d+; /],
+    ['the write flushed, with the input socket counts', /; write flushed (\d+|none) \(input socket: \d+ B written, \d+ B queued\); /],
+    ['TIMEOUT seen, and no BYTES', /; TIMEOUT seen \d+; BYTES seen none; /],
+    ['the exit with its code', /; exit \d+ code \d+; /],
+    ["the child's start, from the timeOrigin in its TIMEOUT line", /; child start \d+ \(its timeOrigin \d+(\.\d+)?, from its TIMEOUT line\); /],
+    ["the child's stdin bytes at its TIMEOUT", /; child stdin at its TIMEOUT \d+ B; /],
+    ['the largest gap of the 100 ms interval', /; largest gap of the 100 ms interval \d+ ms, ended at \d+$/]
+  ];
+  for (const [field, re] of FIELDS) assert.match(record, re, `the record carries ${field}`);
+  // The stamps are in the order the call ran: nothing is written before READY, and TIMEOUT is not
+  // before READY. (The write is not compared with TIMEOUT: one chunk can hold both lines.)
+  const ms = (name) => Number(new RegExp(`; ${name} (\\d+); `).exec(record)[1]);
+  assert.ok(ms('first chunk') <= ms('READY seen') && ms('READY seen') <= ms('write issued') && ms('READY seen') <= ms('TIMEOUT seen'),
+    `first chunk, READY, then the write and TIMEOUT (${record})`);
 });
