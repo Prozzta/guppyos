@@ -231,6 +231,8 @@ class Rig {
     for (const o of (Array.isArray(outs) ? outs : [])) if (o.agentId === agentId) lines.push('outcome ' + o.cls + ' ' + JSON.stringify(o.outcome));
     for (const r of this.transcript(agentId)) {
       if (r.kind === 'hook') lines.push(`stub hook ${r.event} transport=${r.transport} exit=${r.exit} ms=${r.ms ?? null} t=${r.t ?? null} response=${r.response ? JSON.stringify(r.response).slice(0, 120) : null}`);
+      else if (r.kind === 'hook-start') lines.push(`stub hook-start ${r.event} t=${r.t ?? null}`);
+      else if (r.kind === 'pty-input') lines.push(`stub pty-input t=${r.t ?? null} ${JSON.stringify(String(r.data ?? '').slice(0, 40))}`);
       else if (['prompt', 'context', 'turn-end', 'cue', 'exit', 'host-gone'].includes(r.kind)) lines.push(`stub ${r.kind} ${JSON.stringify({ t: r.t, event: r.event, ids: r.ids, how: r.how, cue: r.cue?.cue, code: r.code })}`);
     }
     return lines.join('\n');

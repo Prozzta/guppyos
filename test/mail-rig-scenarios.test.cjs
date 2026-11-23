@@ -28,13 +28,60 @@ test('SCENARIO human-typed turn: pending mail is surfaced by the turn a person s
   await rig.call('capacityHold', { on: true });   // no wake could go out even if one were tried
   const m = await rig.call('send', { to: 'cl-1', subject: 'human turn', body: 'for the next turn, whoever starts it' });
   await rig.call('humanType', { id: 'cl-1', text: 'what is next?\r' });
-  await waitFor(() => acted(rig, 'cl-1', m.id), { what: 'acted in the human turn' });
+  await waitFor(() => acted(rig, 'cl-1', m.id), { what: 'acted in the human turn', diag: () => rig.diagnose('cl-1') });
   assert.deepEqual(rig.prompts('cl-1').map((p) => p.text), ['what is next?'], 'the only prompt is the person\'s');
   assert.ok(rig.contexts('cl-1')[0].ids.includes(m.id), 'its UserPromptSubmit carried the block');
   await rig.call('capacityHold', { on: false });
   for (let i = 0; i < 3; i++) { await rig.call('advance', { ms: 70_000 }); await rig.beat(); await sleep(250); }
   assert.equal((await rig.call('outcomes')).filter((o) => o.outcome.kind === 'COMMITTED').length, 0, 'the coordinator found nothing pending: no wake at all');
   assert.equal(rig.prompts('cl-1').length, 1);
+});
+
+// FLAKE-MAIL-RIG-SCENARIO-HUMAN-TURN-ACTED-TIMEOUT-108 (step 1, diagnostics only): the 'acted' wait above ran 20 s
+// and said nothing about WHERE the chain stopped. The chain: (1) the keys reach the stub (pty-input) -> (2) the stub
+// starts its turn (prompt) and sends its hook (hook-start) -> (3) the UserPromptSubmit POST returns (hook) ->
+// (4) the block is claimed (surfacing) -> (5) the UPS answer is confirmed (surfaced) -> (6) the Stop hook is sent
+// and returns -> (7) the epoch matches at markActed (acted). Each cell holds ONE link and asserts the dump text that
+// names it, so a real red reads against the same lines. (The G1/F11 waits' diags are a follow-up outside this card.)
+const stalled = async (t, scenario, { hold = null, after = null } = {}) => {
+  const rig = await startRig(t);
+  await rig.setup([{ id: 'cl-1', flavour: 'claude', scenario }]);
+  await rig.call('capacityHold', { on: true });
+  const m = await rig.call('send', { to: 'cl-1', subject: 'human turn', body: 'for the next turn' });
+  await rig.call('humanType', { id: 'cl-1', text: 'what is next?\r' });
+  if (after) await after(rig);
+  let dump = '';
+  try { await waitFor(() => acted(rig, 'cl-1', m.id), { what: 'acted (held on purpose)', timeoutMs: 3000, diag: () => rig.diagnose('cl-1') }); } catch (e) { dump = String(e.message); }
+  assert.match(dump, /timed out after 3000 ms waiting for acted/, 'the wait must fail, on its own timeout');
+  return dump;
+};
+test('SCENARIO acted-timeout dump names link 1: the keys are never read (echo held): no pty-input, no prompt', T, async (t) => {
+  const dump = await stalled(t, { echoHold: true });
+  assert.doesNotMatch(dump, /stub pty-input/);
+  assert.doesNotMatch(dump, /stub prompt/);
+  assert.doesNotMatch(dump, /stub hook-start UserPromptSubmit/);
+});
+test('SCENARIO acted-timeout dump names link 2: the keys are read and the turn starts, but the hook is not sent (slowStubMs sleeps in runTurn)', T, async (t) => {
+  const dump = await stalled(t, { slowStubMs: 8000 });
+  assert.match(dump, /stub pty-input t=\d+ /);
+  assert.match(dump, /stub prompt /);
+  assert.doesNotMatch(dump, /stub hook-start UserPromptSubmit/);
+});
+test('SCENARIO acted-timeout dump names link 3: the UserPromptSubmit POST is in flight (hook-start, no hook row)', T, async (t) => {
+  const dump = await stalled(t, { hookLagMs: 8000 });
+  assert.match(dump, /stub hook-start UserPromptSubmit t=\d+/);
+  assert.doesNotMatch(dump, /stub hook UserPromptSubmit transport/);
+});
+test('SCENARIO acted-timeout dump names link 6: the Stop POST is in flight after the UPS answer (hook-start Stop, no Stop row, the entry still surfacing or surfaced)', T, async (t) => {
+  const dump = await stalled(t, { manualTurns: true }, { after: async (rig) => {
+    await waitFor(() => rig.hooks('cl-1', 'UserPromptSubmit').length === 1, { what: 'turn started' });
+    rig.cue('cl-1', { cue: 'hook-lag', ms: 8000 });
+    rig.cue('cl-1', { cue: 'stop' });
+  } });
+  assert.match(dump, /stub hook UserPromptSubmit transport/);
+  assert.match(dump, /stub hook-start Stop t=\d+/);
+  assert.doesNotMatch(dump, /stub hook Stop transport/);
+  assert.match(dump, /ledger \S+: state=surfac(ing|ed) /);
 });
 
 test('SCENARIO mid-turn PostToolUse delivery: mail that arrives during a turn is shown at the next tool hook, with the mid-turn wording', T, async (t) => {
