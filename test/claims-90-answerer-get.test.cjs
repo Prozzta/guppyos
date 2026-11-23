@@ -13,16 +13,22 @@ const fs = require('node:fs');
 const { rmTree } = require('./tools/rm-tree.cjs');
 const os = require('node:os');
 const path = require('node:path');
+const fsp = require('node:fs/promises');
 
 const JAIL = fs.mkdtempSync(path.join(os.tmpdir(), 'md-c90-answerer-get-'));
 const prior = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
 process.env.HOME = JAIL; process.env.USERPROFILE = JAIL;
 assert.equal(os.homedir(), JAIL, 'HOME must be jailed before any product code loads');
 const STORES = [];
+/** The teardown of a folder and the managers over it (the file's own, and the teardown cell's). */
+function closeThenDelete(dir, hives) {
+  rmTree(dir);
+  for (const h of hives) h.dispose();
+}
 test.after(() => {
   for (const s of STORES) s.close();
   for (const [k, v] of Object.entries(prior)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
-  rmTree(JAIL);
+  closeThenDelete(JAIL, HIVES);
 });
 
 const loadTs = require('./load-ts.cjs');
@@ -71,7 +77,6 @@ async function fixture() {
   return { root, store, agents, app, child, ids: { old, cur } };
 }
 const HIVES = [];
-test.after(() => { for (const h of HIVES) h.dispose(); });
 const depsOf = (f) => claimsDepsFor(L, { hive: f.root, store: f.store, agents: f.agents, allTasks: f.child.allTasks });
 
 /** The oracle: index.ts's get closure body before the move (65bec666), over the same hive. */
@@ -177,6 +182,50 @@ test('claims: () => null (the step 3 runs) answers get and history "unsupported 
   const g = A.unavailableOf([{ unavailable: true }, { unavailable: false }], [{ result: { text: 'Exit code 2\nmemory: unsupported command get' } }, { result: { text: 'ok' } }, {}]);
   assert.deepEqual(g, { serve: 1, transcript: 1 });
   assert.deepEqual(A.unavailableOf([{ unavailable: false }], [{ result: { text: 'card.c90-fix current' } }]), { serve: 0, transcript: 0 });
+});
+
+// FLAKE-LAG-SYNC-IO-107-AFTERHOOK-ENOTEMPTY-108: allTasks() arms the manager's 1 s archive
+// re-read timer, and dispose() does not stop it. A tick reads the archive files with nobody
+// waiting for it. Here the first tick's read is held open on a real file handle until the
+// manager's own drain has finished, so the teardown must stop the timer and wait for the read by
+// itself before it deletes the folder.
+test('teardown: the file waits for the archive re-read the 1 s timer started before it deletes the folder', async () => {
+  const home = path.join(JAIL, 'teardown');
+  const root = path.join(home, 'hive');
+  fs.mkdirSync(path.join(root, 'tasks-archive'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'tasks.json'), JSON.stringify({ tasks: [{ id: 'C90-FIX', title: 'a card', status: 'doing' }] }));
+  fs.writeFileSync(path.join(root, 'tasks-archive', '2026-10.jsonl'), `${JSON.stringify({ card: { id: 'C90-OLD', title: 'an archived card', status: 'done' } })}\n`);
+  const hm = new HiveManager(() => home);
+  const events = [];
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  let held = null;
+  const realRead = fsp.readFile;
+  const realDrain = hm.drainReads.bind(hm);
+  try {
+    fsp.readFile = function (p, ...rest) {
+      if (held || !String(p).startsWith(home) || !/\.jsonl$/.test(String(p))) return realRead.call(this, p, ...rest);
+      held = (async () => {
+        const fh = await fsp.open(p, 'r');
+        try { await gate; return await fh.readFile(...rest); } finally { await fh.close(); events.push('archive read closed'); }
+      })();
+      return held;
+    };
+    // Let go only once the manager's own drain has resolved.
+    hm.drainReads = () => realDrain().then(() => { setImmediate(release); });
+    assert.equal(hm.allTasks().tasks.length, 2, 'the archive is read, which arms the timer');
+    for (let i = 0; held === null && i < 500; i++) await new Promise((r) => setTimeout(r, 20));
+    assert.ok(held, 'a timer tick opened the archive file');
+    assert.deepEqual(events, [], 'the re-read is still open when the test body ends');
+    await closeThenDelete(home, [hm]);
+    events.push('folder deleted');
+  } finally {
+    release();
+    fsp.readFile = realRead;
+    if (held) await held.catch(() => undefined);
+    hm.stopLedgerGuard(); hm.dispose(); // a red run leaves no timer; its folder goes with the jail
+  }
+  assert.deepEqual(events, ['archive read closed', 'folder deleted']);
 });
 
 test('god 3164a1 R5: the session folder name is the cwd with every non-alphanumeric a dash (as the step3-r2 folders)', () => {
