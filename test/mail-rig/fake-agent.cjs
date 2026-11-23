@@ -344,6 +344,7 @@ class FakeAgent {
       case 'interrupt': this.interrupt('cue'); return;
       // LOAD-FLAKES-176 (Jim A1): from now on every hook and turn start waits this long first (a
       // loaded machine, on purpose, for one phase of a test; RIG_SLOW_STUB_MS does it from spawn).
+      case 'hook-lag': this.scenario.hookLagMs = Number(cue.ms) || 0; return;
       case 'slow-starts': this.scenario.slowStubMs = Number(cue.ms) || 0; return;
       // TEST-FLAKE-MAILRIG-C1: a turn start held until the DRIVER releases it, not for a real time.
       // `slow-starts` held it N ms of wall clock, so whether the driver saw the re-wake while it was
@@ -663,8 +664,14 @@ class FakeAgent {
   /** Fire one hook through this flavour's real transport. Resolves {response, transport, exit}. */
   async hook(event, extra) {
     if (this.hung) return null;
+    // FLAKE-MAIL-RIG-SCENARIO-HUMAN-TURN-ACTED-TIMEOUT-108: the 'hook' record below is written only when the hook
+    // RETURNS, so a POST still in flight looked like a stub that never sent it. 'hook-start' marks the send.
+    this.rec('hook-start', { event });
     // LOAD-FLAKES-176: a slow machine, reproduced on purpose (RIG_SLOW_STUB_MS, see driver.cjs).
     if (this.scenario.slowStubMs > 0) await sleep(this.scenario.slowStubMs);
+    // Test-only seam (same card): a delay AFTER hook-start, in hooks only (runTurn's own sleep is not it), so a
+    // hook in flight reproduces on its own; the 'hook-lag' cue sets it for the NEXT hooks (the Stop).
+    if (this.scenario.hookLagMs > 0) await sleep(this.scenario.hookLagMs);
     const payload = this.payloadFor(event, extra);
     let r;
     if (this.hookMode === 'exit127' || (this.hookMode === 'ups-silent' && (event === 'UserPromptSubmit' || event === 'PreInvocation' || event === 'BeforeAgent'))) {

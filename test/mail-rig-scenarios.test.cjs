@@ -28,13 +28,71 @@ test('SCENARIO human-typed turn: pending mail is surfaced by the turn a person s
   await rig.call('capacityHold', { on: true });   // no wake could go out even if one were tried
   const m = await rig.call('send', { to: 'cl-1', subject: 'human turn', body: 'for the next turn, whoever starts it' });
   await rig.call('humanType', { id: 'cl-1', text: 'what is next?\r' });
-  await waitFor(() => acted(rig, 'cl-1', m.id), { what: 'acted in the human turn' });
+  await waitFor(() => acted(rig, 'cl-1', m.id), { what: 'acted in the human turn', diag: () => rig.diagnose('cl-1') });
   assert.deepEqual(rig.prompts('cl-1').map((p) => p.text), ['what is next?'], 'the only prompt is the person\'s');
   assert.ok(rig.contexts('cl-1')[0].ids.includes(m.id), 'its UserPromptSubmit carried the block');
   await rig.call('capacityHold', { on: false });
   for (let i = 0; i < 3; i++) { await rig.call('advance', { ms: 70_000 }); await rig.beat(); await sleep(250); }
   assert.equal((await rig.call('outcomes')).filter((o) => o.outcome.kind === 'COMMITTED').length, 0, 'the coordinator found nothing pending: no wake at all');
   assert.equal(rig.prompts('cl-1').length, 1);
+});
+
+// FLAKE-MAIL-RIG-SCENARIO-HUMAN-TURN-ACTED-TIMEOUT-108 (step 1, diagnostics only): the 'acted' wait above ran 20 s
+// and said nothing about WHERE the chain stopped. The chain, for a Claude agent:
+// (1) the keys reach the stub (pty-input) -> (2) the stub starts its turn (prompt) and sends its hook (hook-start)
+// -> (3) the UserPromptSubmit POST returns (hook) -> (4) the block is claimed (surfacing) -> (6) the Stop hook is
+// sent and returns -> (7) the epoch closes and markActed moves the entry to acted.
+// (5) the confirmation (surfacing -> surfaced) is NOT a step of its own: a Claude agent confirms by evidence over the
+// pipe, from a later hook (while mailAwaiting is set) or AT the Stop close itself (closeMailEpoch calls
+// confirmMailSurfacing before closeEpoch). With no evidence at the close, the entry goes back to delivered with a
+// mail-surface-unconfirmed row and is NOT acted: a likely place for a real red, and the dump shows it (the ledger
+// line's state/redelivered/confirm and the mail rows). So a held Stop reads state=surfacing (or surfaced).
+// Each cell below holds ONE link and asserts the dump text that names it. The G1/F11 waits' diags are a follow-up
+// outside this card.
+const stalled = async (t, scenario, { cueBefore = null, after = null } = {}) => {
+  const rig = await startRig(t);
+  await rig.setup([{ id: 'cl-1', flavour: 'claude', scenario }]);   // the seams are cued AFTER setup: the SessionStart wait is not slowed
+  await rig.call('capacityHold', { on: true });
+  const m = await rig.call('send', { to: 'cl-1', subject: 'human turn', body: 'for the next turn' });
+  if (cueBefore) {
+    rig.cue('cl-1', cueBefore);   // the stub reads its control file by polling: wait until it has taken the cue
+    await waitFor(() => rig.transcript('cl-1').some((r) => r.kind === 'cue' && r.cue?.cue === cueBefore.cue), { what: 'the stub took the ' + cueBefore.cue + ' cue' });
+  }
+  await rig.call('humanType', { id: 'cl-1', text: 'what is next?\r' });
+  if (after) await after(rig);
+  let dump = '';
+  try { await waitFor(() => acted(rig, 'cl-1', m.id), { what: 'acted (held on purpose)', timeoutMs: 3000, diag: () => rig.diagnose('cl-1') }); } catch (e) { dump = String(e.message); }
+  assert.match(dump, /timed out after 3000 ms waiting for acted/, 'the wait must fail, on its own timeout');
+  assert.match(dump, /stub hook SessionStart transport/, 'the dump carries the stub transcript at all (SessionStart is sent at spawn)');
+  return dump;
+};
+test('SCENARIO acted-timeout dump names link 1: the keys are never read (echo held): no pty-input, no prompt', T, async (t) => {
+  const dump = await stalled(t, { echoHold: true });
+  assert.doesNotMatch(dump, /stub pty-input/);
+  assert.doesNotMatch(dump, /stub prompt/);
+  assert.doesNotMatch(dump, /stub hook-start UserPromptSubmit/);
+});
+test('SCENARIO acted-timeout dump names link 2: the keys are read and the turn starts, but the hook is not sent (slowStubMs sleeps in runTurn)', T, async (t) => {
+  const dump = await stalled(t, {}, { cueBefore: { cue: 'slow-starts', ms: 8000 } });
+  assert.match(dump, /stub pty-input t=\d+ /);
+  assert.match(dump, /stub prompt /);
+  assert.doesNotMatch(dump, /stub hook-start UserPromptSubmit/);
+});
+test('SCENARIO acted-timeout dump names link 3: the UserPromptSubmit POST is in flight (hook-start, no hook row)', T, async (t) => {
+  const dump = await stalled(t, {}, { cueBefore: { cue: 'hook-lag', ms: 8000 } });
+  assert.match(dump, /stub hook-start UserPromptSubmit t=\d+/);
+  assert.doesNotMatch(dump, /stub hook UserPromptSubmit transport/);
+});
+test('SCENARIO acted-timeout dump names link 6: the Stop POST is in flight after the UPS answer (hook-start Stop, no Stop row, the entry not yet acted)', T, async (t) => {
+  const dump = await stalled(t, { manualTurns: true }, { after: async (rig) => {
+    await waitFor(() => rig.hooks('cl-1', 'UserPromptSubmit').length === 1, { what: 'turn started' });
+    rig.cue('cl-1', { cue: 'hook-lag', ms: 8000 });
+    rig.cue('cl-1', { cue: 'stop' });
+  } });
+  assert.match(dump, /stub hook UserPromptSubmit transport/);
+  assert.match(dump, /stub hook-start Stop t=\d+/);
+  assert.doesNotMatch(dump, /stub hook Stop transport/);
+  assert.match(dump, /ledger \S+: state=surfac(ing|ed) /);
 });
 
 test('SCENARIO mid-turn PostToolUse delivery: mail that arrives during a turn is shown at the next tool hook, with the mid-turn wording', T, async (t) => {
