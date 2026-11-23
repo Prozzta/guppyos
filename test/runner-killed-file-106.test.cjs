@@ -71,6 +71,55 @@ test('runNodeTest says the cause on stderr, and never for a file one of the runn
   assert.ok(removed.includes('ev.jsonl.starts.kills'), 'the kills record is cleaned up');
 });
 
+// RUNNER-KEEP-RECORDS-ON-ABNORMAL-FILE-EXIT-108 (god e88cb4): two suite files died with exit -1 and no
+// output, and the records that held their pid and birth time were deleted with the run, so the time
+// window could not be matched against anything outside. A lost file now keeps (a copy of) the
+// records, and the runner prints the dead file's pid, birth and end.
+const RECORDS = ['ev.jsonl', 'ev.jsonl.watchdog', 'ev.jsonl.backstop', 'ev.jsonl.starts', 'ev.jsonl.starts.kills'];
+const lostFixture = () => ({
+  'ev.jsonl.starts': [
+    row({ pid: 11, bornMs: 1000, file: 'victim.test.cjs' }),
+    row({ pid: 14, bornMs: 2000, file: 'reused.test.cjs' }),
+    row({ pid: 14, bornMs: 3000, file: 'next.test.cjs' }),
+    row({ pid: 14, exited: true }),
+  ].join('\n'),
+  'ev.jsonl.starts.kills': '',
+});
+const runWith = (files, extra) => {
+  const e = []; const order = [];
+  runner.runNodeTest({ rel: ['x'], label: '', spawn: () => ({ status: 1 }), cwd: '.', timeoutMs: 5, isTTY: false, env: {},
+    eventsFile: 'ev.jsonl', readFile: (f) => files[f] || '', removeFile: (f) => order.push(['rm', f]), watchdog: () => ({ stop: () => {} }),
+    backstop: () => ({ opt: '', env: {}, stop: () => {} }), err: (l) => e.push(l), now: () => 9000, ...extra });
+  return { errs: e.join('\n'), order };
+};
+
+test('a file that ended without exiting: its records are COPIED to a kept folder before the cleanup, and its pid, birth and end are printed', () => {
+  const { errs, order } = runWith(lostFixture(), { keepRecords: (dir, files) => { order.push(['keep', dir, files]); return files; } });
+  const keeps = order.filter((o) => o[0] === 'keep');
+  assert.equal(keeps.length, 1, `THE RECORDS ARE KEPT, ONCE:\n${JSON.stringify(order)}`);
+  assert.equal(keeps[0][1], path.join('.', 'kept-ev.jsonl'), 'the kept folder sits beside the records, under a name the cleanup never removes');
+  assert.deepEqual([...keeps[0][2]].sort(), [...RECORDS].sort(), 'every record of the leg is kept');
+  assert.ok(order.findIndex((o) => o[0] === 'keep') < order.findIndex((o) => o[0] === 'rm'), 'THE COPY IS MADE BEFORE ANY RECORD IS REMOVED');
+  assert.deepEqual(order.filter((o) => o[0] === 'rm').map((o) => o[1]), RECORDS, 'the cleanup is unchanged: the originals are still removed');
+  assert.match(errs, /pid 11: born 1970-01-01T00:00:01\.000Z \(bornMs 1000\); ended by 1970-01-01T00:00:09\.000Z, when node --test returned \(no exit row\): victim\.test\.cjs/, `THE DEAD FILE'S WINDOW IS PRINTED:\n${errs}`);
+  assert.match(errs, /pid 14: born 1970-01-01T00:00:02\.000Z \(bornMs 2000\); ended before 1970-01-01T00:00:03\.000Z, when a later file started under its pid: reused\.test\.cjs/, `A REUSED PID BOUNDS THE END:\n${errs}`);
+  assert.match(errs, /records kept \(copied, not moved\) in kept-ev\.jsonl: ev\.jsonl, /, `THE KEPT FOLDER IS NAMED:\n${errs}`);
+});
+
+test('a run with no lost file keeps nothing and cleans up exactly as before', () => {
+  const { errs, order } = runWith({ 'ev.jsonl.starts': [row({ pid: 11, bornMs: 1000, file: 'ok.test.cjs' }), row({ pid: 11, exited: true })].join('\n') },
+    { keepRecords: () => { throw new Error('KEPT ON A NORMAL EXIT'); } });
+  assert.deepEqual(order, RECORDS.map((f) => ['rm', f]), 'the same removals in the same order, and no keep');
+  assert.doesNotMatch(errs, /records kept|could not keep/);
+});
+
+test('a keep that fails is said, and the cleanup still runs', () => {
+  const { errs, order } = runWith(lostFixture(), { keepRecords: () => { throw new Error('disk full'); } });
+  assert.match(errs, /could not keep the records in kept-ev\.jsonl: Error: disk full/, errs);
+  assert.deepEqual(order.map((o) => o[1]), RECORDS, 'the cleanup is unchanged when the copy fails');
+  assert.match(errs, /pid 11: born 1970-01-01T00:00:01\.000Z/, 'the window is printed even when the copy fails');
+});
+
 test('END TO END: two test files force-kill two others by pid (taskkill, process.kill); the run fails and names each victim, kill and killer', { timeout: 120_000 }, () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-killed106-'));
   const pidFile = path.join(dir, 'victim.pid');
@@ -125,6 +174,12 @@ test('END TO END: two test files force-kill two others by pid (taskkill, process
     assert.match(errs, /its pid \d+ was named by a kill \(process\.kill\) from .*e-killer2\.test\.cjs \(pid \d+\), \d+ ms after it started/, `THE process.kill AND THE FILE THAT MADE IT ARE NAMED:\n${errs}`);
     assert.doesNotMatch(errs, /(b-killer|c-ok|e-killer2)\.test\.cjs$/m, 'ONLY THE KILLED FILE IS REPORTED: files that exited are not');
     assert.deepEqual(fs.readdirSync(dir).filter((n) => n.startsWith('ev.jsonl')), [], 'the record files (the kills record among them) are cleaned up');
+    // RUNNER-KEEP-RECORDS-ON-ABNORMAL-FILE-EXIT-108: the default keep copies the real records first.
+    const kept = path.join(dir, 'kept-ev.jsonl');
+    assert.ok(fs.existsSync(path.join(kept, 'ev.jsonl.starts')), `THE STARTS RECORD IS KEPT ON DISK:\n${errs}`);
+    assert.match(fs.readFileSync(path.join(kept, 'ev.jsonl.starts'), 'utf8'), /a-victim\.test\.cjs/, 'the kept copy holds the dead file\'s start row');
+    assert.match(fs.readFileSync(path.join(kept, 'ev.jsonl.starts.kills'), 'utf8'), /b-killer\.test\.cjs/, 'the kept copy holds the kill rows');
+    assert.match(errs, /pid \d+: born \d{4}-\d\d-\d\dT[\d:.]+Z \(bornMs \d+\); ended by \d{4}-\d\d-\d\dT[\d:.]+Z, when node --test returned \(no exit row\): .*a-victim\.test\.cjs/, `THE WINDOW IS PRINTED:\n${errs}`);
   } finally {
     for (let i = 0; i < 50; i++) { try { fs.rmSync(dir, { recursive: true, force: true }); break; } catch { spawnSync(process.execPath, ['-e', 'setTimeout(()=>{},200)']); } }
   }
