@@ -45,8 +45,8 @@ test('endedWithoutExit: a start with no exit row is named; an exited file and a 
     'torn',
   ].join('\n');
   assert.deepEqual(runner.endedWithoutExit(starts, kills), [
-    { pid: 11, file: 'victim.test.cjs', kills: [{ via: 'taskkill', file: 'killer.test.cjs', pid: 21, self: false, afterMs: 792 }] },
-    { pid: 12, file: 'crashed.test.cjs', kills: [] },
+    { pid: 11, file: 'victim.test.cjs', bornMs: 1100, untilMs: 5000, kills: [{ via: 'taskkill', file: 'killer.test.cjs', pid: 21, self: false, afterMs: 792 }] },
+    { pid: 12, file: 'crashed.test.cjs', bornMs: 6000, untilMs: null, kills: [] },
   ]);
   assert.deepEqual(runner.endedWithoutExit('', ''), []);
   assert.deepEqual(runner.endedWithoutExit(undefined), []);
