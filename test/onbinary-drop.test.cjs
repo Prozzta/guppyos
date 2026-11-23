@@ -151,18 +151,43 @@ test('ONBINARY-DROP: a child that answers but says its stdout is no TTY is refus
 // host 'inbox': it starts the child at once. On the bundled OpenConsole the helper's child starts about
 // 3 s after the spawn, and which of the two clocks wins there is what the record is for, so a cell on
 // that host could pin only one of the two names.
-test("ONBINARY-DROP: a 'PTY child timed out' red carries the record of where the time went", { skip: process.platform !== 'win32' }, async (t) => {
+const TIMES_OUT = "{ const once = process.stdin.once; process.stdin.once = function (name, ...rest) { return name === 'data' ? this : once.call(this, name, ...rest); };"
+  + ' const real = setTimeout; globalThis.setTimeout = (fn) => real(fn, 250); }';
+// The exit in the record is the terminal's exit event as the helper's seal saw it. The helper settles
+// when the conout worker has gone and does not wait for that event, so both forms are legal. A mixed
+// form (a stamp with no code, a code with no stamp) is not: the two are set together.
+const EXIT_FIELD = /; exit (?:\d+ code \d+|none code none); /;
+// What the record cell demanded until 2026-11-23. It pinned an order the helper never promised, and
+// went red on an Electron suite leg whose record said 'exit none code none'.
+const EXIT_SEEN_ONLY = /; exit \d+ code \d+; /;
+const TEARDOWN_FIELD = /; teardown: child ended by pid (\d+|not needed \(it had exited\)); terminal kill (\d+); conout worker gone (\d+); /;
+
+/** One real child that times out, on the inbox host. Returns the rejection and its record line. */
+async function timedOut(t, onSpawn) {
   const node = consoleNode();
   t.diagnostic(`PTY child: ${node.file} ${node.version} (from ${node.from})`);
-  const prelude = "{ const once = process.stdin.once; process.stdin.once = function (name, ...rest) { return name === 'data' ? this : once.call(this, name, ...rest); };"
-    + ' const real = setTimeout; globalThis.setTimeout = (fn) => real(fn, 250); }';
-  let message;
-  await assert.rejects(childBytes(X10_HIGH_COLUMN, { file: node.file, host: 'inbox', prelude }), (e) => { message = e.message; return true; });
-  t.diagnostic(message);
-  const lines = message.split('\n');
+  let error;
+  await assert.rejects(childBytes(X10_HIGH_COLUMN, { file: node.file, host: 'inbox', prelude: TIMES_OUT, onSpawn }), (e) => { error = e; return true; });
+  t.diagnostic(error.message);
+  const lines = error.message.split('\n');
   assert.equal(lines[0], 'PTY child timed out', 'the name is unchanged, and alone on the first line');
   assert.equal(lines.length, 2, 'the record is one line after the name');
-  const record = lines[1];
+  return { error, record: lines[1] };
+}
+
+/**
+ * Puts the terminal's exit event in the test's hands: the helper subscribes through this wrap (it
+ * calls proc.onExit after onSpawn), the real event never reaches it, and the cell passes one in when
+ * it chooses. So the order of the exit against the helper's settle is set by the cell, not by timing.
+ */
+function holdExit(proc) {
+  const held = { listener: null };
+  Object.defineProperty(proc, 'onExit', { configurable: true, value: (listener) => { held.listener = listener; return { dispose() {} }; } });
+  return held;
+}
+
+test("ONBINARY-DROP: a 'PTY child timed out' red carries the record of where the time went", { skip: process.platform !== 'win32' }, async (t) => {
+  const { record } = await timedOut(t);
   const FIELDS = [
     ['the head, and which call it was (the input says which terminal of a cell)', /^ {2}record, ms since the spawn: call \d+ in this process, input string 1b5b4d208521; /],
     ['the first chunk', /; first chunk \d+; /],
@@ -170,7 +195,8 @@ test("ONBINARY-DROP: a 'PTY child timed out' red carries the record of where the
     ['the write issued', /; write issued \d+; /],
     ['the write flushed, with the input socket counts', /; write flushed (\d+|none) \(input socket: \d+ B written, \d+ B queued\); /],
     ['TIMEOUT seen, and no BYTES', /; TIMEOUT seen \d+; BYTES seen none; /],
-    ['the exit with its code', /; exit \d+ code \d+; /],
+    ['the exit as the seal saw it: with its code, or not seen', EXIT_FIELD],
+    ['the three teardown steps', TEARDOWN_FIELD],
     ["the child's start, from the timeOrigin in its TIMEOUT line", /; child start \d+ \(its timeOrigin \d+(\.\d+)?, from its TIMEOUT line\); /],
     ["the child's stdin bytes at its TIMEOUT", /; child stdin at its TIMEOUT \d+ B; /],
     ['the largest gap of the 100 ms interval', /; largest gap of the 100 ms interval \d+ ms, ended at \d+$/]
@@ -181,4 +207,46 @@ test("ONBINARY-DROP: a 'PTY child timed out' red carries the record of where the
   const ms = (name) => Number(new RegExp(`; ${name} (\\d+); `).exec(record)[1]);
   assert.ok(ms('first chunk') <= ms('READY seen') && ms('READY seen') <= ms('write issued') && ms('READY seen') <= ms('TIMEOUT seen'),
     `first chunk, READY, then the write and TIMEOUT (${record})`);
+  // The teardown is after TIMEOUT and in its own order: the child by pid (if it still ran), then the
+  // terminal's kill, then the worker's end. Order only: no step is given a bound here.
+  const [, byPid, termKill, workerGone] = TEARDOWN_FIELD.exec(record);
+  if (/^\d+$/.test(byPid)) assert.ok(ms('TIMEOUT seen') <= Number(byPid) && Number(byPid) <= Number(termKill), `TIMEOUT, the child by pid, then the terminal kill (${record})`);
+  assert.ok(ms('TIMEOUT seen') <= Number(termKill) && Number(termKill) <= Number(workerGone), `TIMEOUT, the terminal kill, then the worker gone (${record})`);
+});
+
+// The two legal orders of the exit against the settle, each set by the cell (holdExit), not by timing.
+test("ONBINARY-DROP: an exit that comes after the settle leaves 'exit none code none' in the record, and the red keeps its name", { skip: process.platform !== 'win32' }, async (t) => {
+  let held;
+  const { error, record } = await timedOut(t, (proc) => { held = holdExit(proc); });
+  assert.equal(typeof held.listener, 'function', 'the helper took its exit event through the wrap (or this cell holds nothing back)');
+  assert.match(record, /; exit none code none; /, 'no exit was seen by the seal, and the record says so');
+  assert.match(record, EXIT_FIELD, 'which the record cell accepts');
+  assert.doesNotMatch(record, EXIT_SEEN_ONLY, 'and which the pin of before 2026-11-23 did not: this is the order that was red');
+  assert.match(record, TEARDOWN_FIELD, 'the teardown steps are there to say where the time went');
+  // The exit now comes, after the settle: it changes nothing that was reported.
+  const before = error.message;
+  held.listener({ exitCode: 1 });
+  assert.equal(error.message, before, 'a late exit does not rewrite the sealed record');
+});
+
+test("ONBINARY-DROP: an exit that comes before the settle is in the record with its stamp and its code", { skip: process.platform !== 'win32' }, async (t) => {
+  let held;
+  let passed = 0;
+  const { record } = await timedOut(t, (proc) => {
+    held = holdExit(proc);
+    // Passed in at the helper's own terminal kill: after TIMEOUT, before the worker can have gone.
+    const kill = proc.kill.bind(proc);
+    proc.kill = (...args) => { passed += 1; if (passed === 1) held.listener({ exitCode: 7 }); return kill(...args); };
+  });
+  assert.equal(passed, 1, 'the helper called the terminal kill once, and the exit was passed in there');
+  const exit = /; exit (\d+) code 7; /.exec(record);
+  assert.ok(exit, `the record carries the exit with the code the cell passed in (${record})`);
+  assert.match(record, EXIT_FIELD);
+  const [, , termKill, workerGone] = TEARDOWN_FIELD.exec(record);
+  assert.ok(Number(termKill) <= Number(exit[1]) && Number(exit[1]) <= Number(workerGone), `the exit is stamped between the terminal kill and the worker gone (${record})`);
+});
+
+test('ONBINARY-DROP: the exit field of the record has two legal forms, and a mixed one is red', () => {
+  for (const legal of ['; exit 812 code 1; ', '; exit 0 code 0; ', '; exit none code none; ']) assert.match(legal, EXIT_FIELD);
+  for (const mixed of ['; exit none code 1; ', '; exit 812 code none; ', '; exit  code ; ', '; exit none code none ', '; exit 812 code -1; ']) assert.doesNotMatch(mixed, EXIT_FIELD);
 });

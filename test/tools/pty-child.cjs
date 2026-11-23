@@ -26,6 +26,12 @@
  * 'exited N') now carry a record line: when each step was seen in ms since the spawn, when the child
  * says it started, what it had read, and the longest stall of this process. It records only: no
  * clock, bound or order of the call is changed by it.
+ * The exit in the record is the terminal's exit event AS THE SEAL SAW IT. The call settles when the
+ * conout worker has gone and does not wait for that event: on the inbox host node-pty emits it when
+ * its output socket closes, and that close is not ordered against the worker's end. So both
+ * 'exit N code N' and 'exit none code none' are legal records (the second was seen on 2026-11-23, an
+ * Electron suite leg). The teardown stamps say where the time went then: when the child was ended by
+ * its pid, when the terminal's kill was called, and when the conout worker had gone.
  */
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -217,6 +223,8 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
     let wrote = false;
     // ---- the record (see the file header). Stamps are ms since the spawn; null is "not seen". ----
     const stamp = { first: null, ready: null, write: null, flushed: null, timeout: null, bytes: null, exit: null, exitCode: null };
+    // The teardown, record only. pidKill stays null on a host where no pid is named (not the inbox).
+    const torn = { pidKill: null, termKill: null, workerGone: null };
     // node-pty's write takes no callback. Its input socket's queue is read instead: a length of 0
     // after the write says the socket's own write callback has run. Read at each tick and each chunk,
     // so the stamp can be up to one tick late. Windows only (no such socket elsewhere).
@@ -243,6 +251,7 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
         + ` first chunk ${show(stamp.first)}; READY seen ${show(stamp.ready)}; write issued ${show(stamp.write)};`
         + ` write flushed ${show(stamp.flushed)}${inSocket ? ` (input socket: ${inSocket.bytesWritten} B written, ${inSocket.writableLength} B queued)` : ' (no input socket to read)'};`
         + ` TIMEOUT seen ${show(stamp.timeout)}; BYTES seen ${show(stamp.bytes)}; exit ${show(stamp.exit)} code ${show(stamp.exitCode)};`
+        + ` teardown: child ended by pid ${show(torn.pidKill)}; terminal kill ${show(torn.termKill)}; conout worker gone ${show(torn.workerGone)};`
         + ` child start ${origin === null ? 'none (no READY or TIMEOUT line with its timeOrigin)' : `${Math.round(origin - spawnWall)} (its timeOrigin ${origin}, from its ${timeout ? 'TIMEOUT' : 'READY'} line)`};`
         + ` child stdin at its TIMEOUT ${timeout ? `${timeout[2]} B` : 'none (no TIMEOUT line)'};`
         + ` largest gap of the ${RECORD_TICK_MS} ms interval ${gap.ms} ms, ended at ${show(gap.endedAt)}`;
@@ -283,6 +292,7 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
         return;
       }
       const byPid = hold.alive();
+      torn.pidKill = byPid ? at() : 'not needed (it had exited)';
       if (byPid) { try { process.kill(proc.pid); } catch { /* gone already */ } }
       // FLAKE-NODEPTY-CONSOLE-LIST-KILL-HARNESSALIVE-NOBODY: that kill returns at once, and the child
       // is on the owner's console until it has gone. The terminal is closed only after that. A child
@@ -293,6 +303,7 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
       offConsole(proc.pid, hold, byPid, owner).then(() => close(error, value), (stuck) => refuse(stuck.message, error));
     }
     function close(error, value) {
+      torn.termKill = at();
       try { proc.kill(); } catch { /* child already exited */ }
       // The hold goes after the last kill that names the pid: node-pty's kill lists the console
       // from a helper it forks, so not before the teardown has settled.
@@ -306,7 +317,7 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
           + ' (node-pty holds kill() back until a first data chunk; armEarlyKill runs it at once)'
           + (error ? `; after: ${seal(error).message}` : ''))), TEARDOWN_CAP_MS);
       })]).then(
-        () => { error ? reject(seal(error)) : resolve(value); },
+        () => { torn.workerGone = at(); error ? reject(seal(error)) : resolve(value); },
         (stuck) => worker.terminate().then(() => reject(stuck))   // named red, and the file still ends
       ).finally(() => { clearTimeout(watchdog); releaseHold(); });
     }
