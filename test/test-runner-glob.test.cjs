@@ -625,7 +625,10 @@ test('END TO END: a file that finishes its tests but never exits is killed at th
     // Captured, so the inner TAP never mixes into this file's own report.
     const spawn = (args, opts) => { const r = spawnSync(process.execPath, args, { ...opts, env: nodeEnv(opts.env), stdio: 'pipe', encoding: 'utf8' }); out = r.stdout; return r; };
     const t0 = Date.now();
-    const code = run({ testDir: dir, cwd: dir, spawn, timeoutMs: 4_000, isTTY: false, log: () => {}, err: e.write, failureFile: () => path.join(dir, 'failures.json') });
+    // The events file lives in dir: the runner keeps a killed file's records next to it and never
+    // removes a keep, so the default (os.tmpdir()) would leave kept-* behind as a TEMP LEAK.
+    const code = run({ testDir: dir, cwd: dir, spawn, timeoutMs: 4_000, isTTY: false, log: () => {}, err: e.write, failureFile: () => path.join(dir, 'failures.json'), eventsFile: path.join(dir, 'events.jsonl') });
+    assert.ok(fs.existsSync(path.join(dir, 'kept-events.jsonl')), 'the killed file\'s records were kept next to the events file, inside dir');
     assert.notStrictEqual(code, 0, 'a hung file fails the run');
     assert.ok(Date.now() - t0 < 60_000, `ended at the limit, not never (${Date.now() - t0} ms)`);
     assert.match(e.lines.join('\n'), /FILE TIMED OUT after 4000 ms .*a-hung\.test\.cjs/);
@@ -954,7 +957,9 @@ test('END TO END, the backstop alone (no watchdog): node --test\'s own file time
     const spawn = (args, opts) => { const r = spawnSync(process.execPath, args, { ...opts, env: nodeEnv(opts.env), stdio: 'pipe', encoding: 'utf8', timeout: 90_000, killSignal: 'SIGKILL' }); timedOut = timedOut || (r.error && r.error.code) === 'ETIMEDOUT'; return r; };
     // GUPPY-NODE-LTS: the REAL backstop (the runner's own), on every Node: an injected watchdog would
     // otherwise turn it off, and Node 24's --test-timeout never kills this file.
-    const code = run({ testDir: dir, cwd: dir, spawn, timeoutMs: 3_000, isTTY: false, log: () => {}, err: e.write, failureFile: () => path.join(dir, 'failures.json'), watchdog: () => ({ stop: () => {} }), backstop: runner.startBackstop });
+    const code = run({ testDir: dir, cwd: dir, spawn, timeoutMs: 3_000, isTTY: false, log: () => {}, err: e.write, failureFile: () => path.join(dir, 'failures.json'), watchdog: () => ({ stop: () => {} }), backstop: runner.startBackstop, eventsFile: path.join(dir, 'events.jsonl') });
+    // In dir, so the keep of the killed file's records goes with dir (the default would leak kept-*).
+    assert.ok(fs.existsSync(path.join(dir, 'kept-events.jsonl')), 'the killed file\'s records were kept next to the events file, inside dir');
     assert.equal(timedOut, false, 'THE BACKSTOP NEVER ENDED THE FILE: node --test was still running at 90 s');
     assert.notStrictEqual(code, 0, 'a hung file fails the run');
     assert.match(e.lines.join('\n'), /FILE TIMED OUT after 3000 ms \(the runner's backstop killed it at 23000 ms\): .*a-hung\.test\.cjs/);
