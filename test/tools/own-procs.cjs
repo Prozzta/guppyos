@@ -154,8 +154,11 @@ function runPowershell(script, { exe = 'powershell.exe', exec = execFileSync } =
 ${script}`;
   const t0 = Date.now();
   try {
-    return exec(exe, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(body, 'utf16le').toString('base64')],
-      { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, timeout: 60_000, env: psEnv() });
+    const args = ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(body, 'utf16le').toString('base64')];
+    // The real PowerShell spawn stays a literal call below, so the ps-modcache-leak census sees it and its psEnv.
+    // The real PowerShell spawn stays a literal execFileSync('powershell.exe', ...) so the ps-modcache-leak census sees it (and its psEnv).
+    if (exe === 'powershell.exe' && exec === execFileSync) return execFileSync('powershell.exe', args, { ...opts, env: psEnv() });
+    return exec(exe, args, { ...opts, env: psEnv() });
   } catch (e) {
     const err = e && typeof e === 'object' ? e : new Error(String(e));
     const text = (v) => (v === undefined || v === null ? '' : String(v));

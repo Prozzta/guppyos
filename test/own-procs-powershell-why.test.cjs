@@ -1,4 +1,5 @@
 'use strict';
+require('./tools/own-job.cjs');
 // FLAKE-BARE-OWNER-CIM-LOOKUP-TIMEOUT-108: a failed PowerShell run in own-procs says HOW it failed.
 // Node's own message is only "Command failed: <command>"; under suite load a start-up death (status 3221225794,
 // empty stderr) looked the same as a timeout or a script error. Nothing here changes timeouts, retries or sleeps.
