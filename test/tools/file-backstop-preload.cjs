@@ -41,7 +41,7 @@ if (out && opt && String(process.env.NODE_TEST_CONTEXT || '').startsWith('child'
   // below sees. own-procs journals it to <out>.stops itself; the path stays on this process only (not in the env,
   // which is cleared above so nothing the file starts is taken for a file of the run).
   process[Symbol.for('guppy.file-backstop')] = { stops: `${out}.stops`, file };
-  const note =(via, targets) => {
+  const note = (via, targets) => {
     const t = targets.map(Number).filter((n) => Number.isInteger(n) && n !== 0).map(Math.abs);
     if (!t.length) return;
     try { fs.appendFileSync(killsOut, `${JSON.stringify({ pid, file, via, targets: t, t: Date.now() })}\n`); } catch { /* the kill itself still runs */ }
