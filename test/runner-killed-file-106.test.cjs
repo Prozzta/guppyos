@@ -59,10 +59,12 @@ test('runNodeTest says the cause on stderr, and never for a file one of the runn
     'ev.jsonl.starts.kills': row({ pid: 21, file: 'killer.test.cjs', via: 'taskkill', targets: [11], t: 1792 }),
     'ev.jsonl.backstop': row({ file: 'hung.test.cjs', by: 'backstop', kill: 'job', message: 'BACKSTOP: killed through its job' }),
   };
-  const e = []; const removed = [];
+  const e = []; const removed = []; const keeps = [];
+  // Jim fa0f5b: an injected-fs run with a lost file injects the keep too (the default writes to the real cwd).
   runner.runNodeTest({ rel: ['x'], label: '', spawn: () => ({ status: 1 }), cwd: '.', timeoutMs: 5, isTTY: false, env: {},
     eventsFile: 'ev.jsonl', readFile: (f) => files[f] || '', removeFile: (f) => removed.push(f), watchdog: () => ({ stop: () => {} }),
-    backstop: () => ({ opt: '', env: {}, stop: () => {} }), err: (l) => e.push(l) });
+    backstop: () => ({ opt: '', env: {}, stop: () => {} }), err: (l) => e.push(l), keepRecords: (dir) => { keeps.push(dir); return []; } });
+  assert.equal(keeps.length, 1, 'the injected keep is the one used');
   const errs = e.join('\n');
   assert.match(errs, /FILE ENDED WITHOUT EXITING \(pid 11\): .*: victim\.test\.cjs/, 'THE KILLED FILE IS NAMED');
   assert.match(errs, /its pid 11 was named by a kill \(taskkill\) from killer\.test\.cjs \(pid 21\), 792 ms after it started/, 'THE KILL THAT HIT IT IS NAMED');
@@ -111,6 +113,13 @@ test('a run with no lost file keeps nothing and cleans up exactly as before', ()
     { keepRecords: () => { throw new Error('KEPT ON A NORMAL EXIT'); } });
   assert.deepEqual(order, RECORDS.map((f) => ['rm', f]), 'the same removals in the same order, and no keep');
   assert.doesNotMatch(errs, /records kept|could not keep/);
+});
+
+test('a keep that found no record file says so, and does not claim a keep', () => {
+  const { errs, order } = runWith(lostFixture(), { keepRecords: () => [] });
+  assert.match(errs, /no record file existed to keep in kept-ev\.jsonl/, errs);
+  assert.doesNotMatch(errs, /records kept/, 'AN EMPTY KEEP IS NOT REPORTED AS A KEEP');
+  assert.deepEqual(order.map((o) => o[1]), RECORDS, 'the cleanup is unchanged');
 });
 
 test('a keep that fails is said, and the cleanup still runs', () => {
