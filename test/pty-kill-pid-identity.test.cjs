@@ -240,8 +240,10 @@ if (!WIN) {
 
   /**
    * A real terminal whose root idles. `holdBack`: node-pty's exit report is kept from the product
-   * until letReport() (the window). Gives the scenario:
+   * until letReport() (the window), and so is its 'exit' event. `holdExit`: only the 'exit' event
+   * is kept back; the report runs when it comes. Gives the scenario:
    *   dead      resolves when node-pty's wait thread has delivered the exit (its handle is closed);
+   *   pipeClosed resolves when the host has closed the output pipe (after node-pty's own listener);
    *   reported  resolves when the report has RUN in JS (the product can know);
    *   exited    resolves on node-pty's 'exit' event (after the product's own handler);
    *   closed    resolves when the ConPTY is closed.
@@ -277,7 +279,8 @@ if (!WIN) {
       const agent = proc._agent;
       const report = agent._$onProcessExit;
       const hooks = [];
-      let holding = opts.holdBack === true;
+      let holdingReport = opts.holdBack === true;
+      let holdingExit = opts.holdBack === true || opts.holdExit === true;
       let pending = null;
       const deliver = (self, code) => {
         const out = report.call(self, code);
@@ -287,7 +290,7 @@ if (!WIN) {
       };
       agent._$onProcessExit = function onProcessExit(code) {
         onDead();
-        if (holding) { pending = () => deliver(this, code); return undefined; }
+        if (holdingReport) { pending = () => deliver(this, code); return undefined; }
         return deliver(this, code);
       };
       // On the bundled OpenConsole (useConptyDll, PTY-CONHOST-ORPHAN option A) node-pty tells the
@@ -295,22 +298,29 @@ if (!WIN) {
       // has gone, and the socket's close emits 'exit' (windowsTerminal.js), whether or not the wait
       // thread's report has run. Holding only the report left that close free: under load it landed
       // before kill(), the product's onExit dropped the session, and kill() found "no pty" (suite
-      // -r8). So the window holds both, and the scenario can wait for the close to be held.
+      // -r8). So the window holds both. The same close, landing before the report, dropped the
+      // session ahead of the quit that quitExited launches in the report's turn: the quit closed
+      // nothing (FLAKE-PTY-KILL-PID-IDENTITY-QUIT-CONPTY-NOT-CLOSED-108). That cell holds the
+      // 'exit' event alone (holdExit), so its report always comes first.
       let pendingExit = null;
-      let onExitHeld = null;
-      const exitHeld = new Promise((resolve) => { onExitHeld = resolve; });
       const emit = proc.emit;
       proc.emit = function emitHeld(ev, ...a) {
-        if (ev === 'exit' && holding) {
+        if (ev === 'exit' && holdingExit) {
           // re-read the code at delivery, as node-pty would have had the close come after the report
           pendingExit = () => emit.call(this, 'exit', this._agent.exitCode, ...a.slice(1));
-          onExitHeld();
           return true;
         }
         return emit.call(this, ev, ...a);
       };
+      // The window waits on the host's pipe close itself, not on an 'exit' emitted while the report
+      // is held: a node-pty that emits 'exit' only once the report has run emits none in the
+      // window. node-pty's own 'close' listener was added at spawn, so it has run by the time this
+      // one does: an 'exit' it emitted there is already held.
+      let onPipeClosed = null;
+      const pipeClosed = new Promise((resolve) => { onPipeClosed = resolve; });
+      agent._outSocket.once('close', () => onPipeClosed());
       letReport = () => {
-        holding = false;
+        holdingReport = false; holdingExit = false;
         const p = pending; pending = null; if (p) p();
         const e = pendingExit; pendingExit = null; if (e) e();
       };
@@ -328,7 +338,7 @@ if (!WIN) {
       if (session.hold) { const release = session.hold.release; session.hold.release = () => { releases += 1; release(); }; }
       /** End the root for real. It is running, so the pid is its own. */
       const endRoot = () => { assert.equal(REAL.rootState(proc), 'running', 'the root is running when the scenario ends it'); realKill.call(process, root); };
-      return await scenario({ m, id, root, proc, session, dead, exitHeld, reported, exited, closed, endRoot, letReport, atReport: (h) => hooks.push(h), closes: () => closes, releases: () => releases, swept });
+      return await scenario({ m, id, root, proc, session, dead, pipeClosed, reported, exited, closed, endRoot, letReport, atReport: (h) => hooks.push(h), closes: () => closes, releases: () => releases, swept });
     } finally {
       reused.delete(root); vacant.delete(root);
       answers = [];
@@ -344,11 +354,11 @@ if (!WIN) {
   const W = {
     /** (a) THE CARD. The root is dead, node-pty has closed its handle, the exit report has not run,
      *  and something is alive under the root's old pid. kill() arrives now. */
-    window: (Pty) => withTerminal(Pty, { holdBack: true }, async ({ m, id, root, proc, dead, exitHeld, closed, endRoot, letReport }) => {
+    window: (Pty) => withTerminal(Pty, { holdBack: true }, async ({ m, id, root, proc, dead, pipeClosed, closed, endRoot, letReport }) => {
       endRoot();
       await within(dead, "node-pty's wait thread to see the root dead");
-      // the worst order, every run: the host's output close has come too (and is held back)
-      await within(exitHeld, "the host's output close (node-pty's 'exit', held back)");
+      // the worst order, every run: the host's output close has come too (its 'exit' is held back)
+      await within(pipeClosed, "the host's output pipe close");
       assert.equal(REAL.rootState(proc), 'running', "the window is real: the root is dead and node-pty's report still reads 'running'");
       assert.ok(m.sessions.has(id), 'the window is real: the product has not been told of the exit by either route');
       reused.add(root);
@@ -371,20 +381,24 @@ if (!WIN) {
       letReport();
     }),
     /** (c) Quit in the same turn as the exit report of a root that died on its own. */
-    quitExited: (Pty) => withTerminal(Pty, {}, async ({ m, root, reported, endRoot, atReport, closes }) => {
+    quitExited: (Pty) => withTerminal(Pty, { holdExit: true }, async ({ m, id, root, reported, endRoot, letReport, atReport, closes }) => {
       let quit = null;
-      atReport(() => { reused.add(root); quit = m.killAllAsync(2_000); });
+      let listed = null;
+      atReport(() => { listed = m.sessions.has(id); reused.add(root); quit = m.killAllAsync(2_000); });
       endRoot();
       await within(reported, "node-pty's exit report");
+      // else the quit finds no session and "names nothing" by never seeing the terminal
+      assert.equal(listed, true, "the report came first: the terminal was still listed when the quit began (node-pty's 'exit' is held back)");
+      letReport();
       await within(quit, 'the quit');
       assert.equal(sweepsOf(root), 0, `QUIT NEVER NAMES A PID ITS ROOT NO LONGER OWNS: the root had exited, another process was alive under pid ${root}, and the quit's taskkill /T /F named it`);
       assert.equal(closes(), 1, 'THE CONPTY IS STILL CLOSED ONCE by the quit');
     }),
     /** (c) Quit inside the window. */
-    quitWindow: (Pty) => withTerminal(Pty, { holdBack: true }, async ({ m, id, root, dead, exitHeld, endRoot, letReport }) => {
+    quitWindow: (Pty) => withTerminal(Pty, { holdBack: true }, async ({ m, id, root, dead, pipeClosed, endRoot, letReport }) => {
       endRoot();
       await within(dead, "node-pty's wait thread to see the root dead");
-      await within(exitHeld, "the host's output close (node-pty's 'exit', held back)");
+      await within(pipeClosed, "the host's output pipe close");
       // else the quit finds no session and "names nothing" by never seeing the terminal
       assert.ok(m.sessions.has(id), 'the window is real: the product has not been told of the exit by either route');
       reused.add(root);
@@ -510,6 +524,8 @@ if (!WIN) {
       run: (mod) => W.quitLive(mod.PtyManager), dies: /QUIT STILL SWEEPS A LIVE ROOT ONCE/ },
     { file: PTYF, name: 'K6 a hold outvotes the exit report', edits: [["  if (state === 'exited') return false;\n  if (s.hold)", '  if (s.hold)']],
       run: (mod) => W.pin(mod.PtyManager, mod), dies: /A REPORTED EXIT WINS OVER A HOLD/ },
+    { file: PTYF, name: 'K7 the quit closes only the terminals whose pid it may name', edits: [['for (const s of sessions) { this.closePty(s); this.dropHold(s); }', 'for (const s of sessions) { if (mayNamePid(s, false)) this.closePty(s); this.dropHold(s); }']],
+      run: (mod) => W.quitExited(mod.PtyManager), dies: /THE CONPTY IS STILL CLOSED ONCE/ },
     { file: PTYF, name: "X2 (Jim) the fallback's repeat drops isAlive", edits: [["return repeat ? state === 'running' && isAlive(s.proc.pid) : true;", "return repeat ? state === 'running' : true;"]],
       run: (mod) => W.fallback(mod.PtyManager), dies: /WITHOUT A HOLD A SECOND SWEEP NEEDS SOMETHING ALIVE UNDER THE PID/ },
     { file: PTYF, name: 'H1 the exit releases the hold under a sweep still running', edits: [['if (!session.holdUsers) session.hold?.release();', 'session.hold?.release();']],
