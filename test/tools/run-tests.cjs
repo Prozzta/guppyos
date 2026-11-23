@@ -509,7 +509,7 @@ function fileJobVerdict({ job, joinFile, strict, readFile, removeFile, log, err 
  * per-file backstop (startBackstop, every platform; never node's --test-timeout), the normal reporter on stdout and the file-timeout reporter (which also
  * records the run's summary counts) on `eventsFile`. Timed-out files are named on stderr.
  */
-function runNodeTest({ rel, extraArgs = [], label, spawn, cwd, timeoutMs, isTTY, env, eventsFile, readFile, removeFile, watchdog, backstop = null, jobExe = null, err }) {
+function runNodeTest({ rel, extraArgs = [], label, spawn, cwd, timeoutMs, isTTY, env, eventsFile, readFile, removeFile, watchdog, backstop = null, jobExe = null, err, keepRecords = copyRecords, now = Date.now }) {
   // The watchdog, the backstop and node --test each write their own record file (node truncates its destination).
   const watchFile = `${eventsFile}.watchdog`;
   const backstopFile = `${eventsFile}.backstop`;
@@ -532,6 +532,7 @@ function runNodeTest({ rel, extraArgs = [], label, spawn, cwd, timeoutMs, isTTY,
   ];
   let res;
   try { res = spawn(args, { cwd, stdio: 'inherit', env: runEnv }); } finally { dog.stop(); if (stop) stop(); }
+  const endedMs = now();
   const events = readFile(eventsFile);
   const failures = failingTests(events);
   const hung = [];
@@ -548,6 +549,14 @@ function runNodeTest({ rel, extraArgs = [], label, spawn, cwd, timeoutMs, isTTY,
   // hook). node --test shows only "exitCode: 1" for it, so the cause is said here.
   const lost = backstop ? endedWithoutExit(readFile(startsFile), readFile(`${startsFile}.kills`))
     .filter((l) => !hung.some((h) => path.resolve(h.file) === path.resolve(l.file))) : [];
+  // RUNNER-KEEP-RECORDS-ON-ABNORMAL-FILE-EXIT-108: a lost file's window lives only in these records;
+  // COPY them aside before the cleanup below (which is unchanged), so it can be matched afterwards.
+  const keptDir = path.join(path.dirname(eventsFile), `kept-${path.basename(eventsFile)}`);
+  let kept = null;
+  if (lost.length) {
+    const records = [eventsFile, watchFile, ...(backstop ? [backstopFile, startsFile, `${startsFile}.kills`] : [])];
+    try { kept = keepRecords(keptDir, records); } catch (e) { err(`[test-runner] ${label}could not keep the records in ${keptDir}: ${String(e)}`); }
+  }
   removeFile(eventsFile);
   removeFile(watchFile);
   if (backstop) { removeFile(backstopFile); removeFile(startsFile); removeFile(`${startsFile}.kills`); }
@@ -555,7 +564,12 @@ function runNodeTest({ rel, extraArgs = [], label, spawn, cwd, timeoutMs, isTTY,
     err(`[test-runner] ${label}FILE ENDED WITHOUT EXITING (pid ${l.pid}): it was killed from outside or crashed hard, which node --test shows only as an exit code with no test output: ${l.file}`);
     for (const k of l.kills) err(`[test-runner] ${label}  its pid ${l.pid} was named by a kill (${k.via}) from ${k.self ? 'the file itself' : `${k.file || 'an unnamed file'} (pid ${k.pid})`}, ${k.afterMs} ms after it started`);
     if (!l.kills.length) err(`[test-runner] ${label}  no recorded kill names its pid ${l.pid} (a kill made by a process a test file started is not recorded)`);
+    const end = Number.isFinite(l.untilMs) ? `ended before ${isoMs(l.untilMs)}, when a later file started under its pid`
+      : `ended by ${isoMs(endedMs)}, when node --test returned (no exit row)`;
+    err(`[test-runner] ${label}  pid ${l.pid}: born ${isoMs(l.bornMs)} (bornMs ${l.bornMs}); ${end}: ${l.file}`);
   }
+  if (kept && kept.length) err(`[test-runner] ${label}records kept (copied, not moved) in ${keptDir}: ${kept.map((f) => path.basename(f)).join(', ')} (never removed by the runner; delete it once read)`);
+  else if (kept) err(`[test-runner] ${label}no record file existed to keep in ${keptDir}`);
   for (const h of hung) {
     const how = h.by === 'backstop' ? `the runner's backstop killed it at ${backstopMs(timeoutMs)} ms`
       : h.by === 'watchdog' ? 'it never finished; the watchdog killed it' : 'it never finished';
@@ -587,10 +601,29 @@ function endedWithoutExit(startsText, killsText = '') {
   lost.push(...live.values());
   const kills = rows(killsText).filter((k) => Array.isArray(k.targets) && Number.isFinite(k.t));
   return lost.map((l) => ({
-    pid: l.pid, file: l.file,
+    pid: l.pid, file: l.file, bornMs: l.bornMs, untilMs: Number.isFinite(l.untilMs) ? l.untilMs : null,
     kills: kills.filter((k) => k.targets.includes(l.pid) && k.t >= l.bornMs && k.t <= l.untilMs)
       .map((k) => ({ via: String(k.via || 'kill'), file: String(k.file || ''), pid: k.pid, self: k.pid === l.pid, afterMs: Math.round(k.t - l.bornMs) })),
   }));
+}
+
+/** ISO time of an epoch-ms value, or the raw value when it is not a time. */
+function isoMs(ms) { try { return new Date(ms).toISOString(); } catch { return String(ms); } }
+
+/**
+ * RUNNER-KEEP-RECORDS-ON-ABNORMAL-FILE-EXIT-108: copy (never move) each record that exists into
+ * `dir`; returns the paths copied. The originals stay for the normal cleanup. The kept folder is
+ * evidence: the runner never removes it (whoever reads it deletes it).
+ */
+function copyRecords(dir, files) {
+  const copied = [];
+  for (const f of files) {
+    if (!fs.existsSync(f)) continue; // no record, no folder: an empty keep leaves nothing behind
+    fs.mkdirSync(dir, { recursive: true });
+    fs.copyFileSync(f, path.join(dir, path.basename(f)));
+    copied.push(f);
+  }
+  return copied;
 }
 
 /** A spawn error or a signal death: logged, and true (the run failed). */
