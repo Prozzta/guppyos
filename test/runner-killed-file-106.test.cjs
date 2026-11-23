@@ -77,7 +77,7 @@ test('runNodeTest says the cause on stderr, and never for a file one of the runn
 // output, and the records that held their pid and birth time were deleted with the run, so the time
 // window could not be matched against anything outside. A lost file now keeps (a copy of) the
 // records, and the runner prints the dead file's pid, birth and end.
-const RECORDS = ['ev.jsonl', 'ev.jsonl.watchdog', 'ev.jsonl.backstop', 'ev.jsonl.starts', 'ev.jsonl.starts.kills'];
+const RECORDS = ['ev.jsonl', 'ev.jsonl.watchdog', 'ev.jsonl.backstop', 'ev.jsonl.starts', 'ev.jsonl.starts.kills', 'ev.jsonl.starts.stops'];
 const lostFixture = () => ({
   'ev.jsonl.starts': [
     row({ pid: 11, bornMs: 1000, file: 'victim.test.cjs' }),

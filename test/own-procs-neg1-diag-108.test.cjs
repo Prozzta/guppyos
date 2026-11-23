@@ -62,7 +62,7 @@ test('(a) a real failing child (not PowerShell: node refuses the flag) is named 
   assert.equal(Number(m[1]), err.pid);
 });
 
-test('(b) each process handed to a stop script is one journal row: time, pid, parent, name, CreationDate, rule, file, killer', () => {
+test('(b) each process handed to a stop script is one journal row: time, pid, parent, name, CreationDate, rule, file, killer', { skip: process.platform !== 'win32' && 'own-procs stops nothing off win32' }, () => {
   const dir = tmpDir();
   try {
     const stops = path.join(dir, 'starts.jsonl.stops');
@@ -97,7 +97,7 @@ test('(b) each process handed to a stop script is one journal row: time, pid, pa
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('(b) the journal is a no-op outside the runner, and a journal that cannot be written never stops the stop', () => {
+test('(b) the journal is a no-op outside the runner, and a journal that cannot be written never stops the stop', { skip: process.platform !== 'win32' && 'own-procs stops nothing off win32' }, () => {
   const dir = tmpDir();
   try {
     const rows = [{ pid: 300, ppid: 1, created: 9000, name: 'cmd.exe' }];
