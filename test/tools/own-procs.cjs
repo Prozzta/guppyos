@@ -178,7 +178,8 @@ ${script}`;
     const t1 = Date.now();
     // FLAKE-OWN-PROCS-POWERSHELL-EXIT-NEG1-EMPTY-108: a run that had a child names it and the wall time around the
     // call, so the Windows PowerShell event log (engine start 400 / stop 403) can be matched to this one process.
-    const child = Number.isInteger(err.pid) ? ` [own-procs powershell child pid=${err.pid} started=${new Date(t0).toISOString()} ended=${new Date(t1).toISOString()}]` : '';
+    // (pid 0 is a spawn that itself failed: there was no child to name.)
+    const child = Number.isInteger(err.pid) && err.pid > 0 ? ` [own-procs powershell child pid=${err.pid} started=${new Date(t0).toISOString()} ended=${new Date(t1).toISOString()}]` : '';
     const why = `[own-procs powershell #${starts} failed after ${t1 - t0} ms: status=${err.status ?? null} signal=${err.signal ?? null} code=${err.code ?? null} stderr=${JSON.stringify(text(err.stderr).slice(0, 400))} stdout=${JSON.stringify(text(err.stdout).slice(0, 200))}]${child}${child ? stopsNaming(err.pid) : ''}`;
     try { err.message = `${err.message} ${why}`; } catch { /* read-only message */ }
     err.powershellWhy = why;
@@ -237,6 +238,8 @@ function stopsJournal() {
   const b = process[BACKSTOP_KEY];
   return b && typeof b === 'object' && typeof b.stops === 'string' && b.stops ? { stops: b.stops, file: typeof b.file === 'string' ? b.file : '' } : null;
 }
+// A test that drives stopIfSame's real stop path with made-up pids writes rows for those pids too: one more
+// reason a row reads as "handed to a stop script", never as "stopped".
 function noteStops(rows) {
   try {
     const j = stopsJournal();
