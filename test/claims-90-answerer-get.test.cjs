@@ -20,15 +20,22 @@ const prior = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
 process.env.HOME = JAIL; process.env.USERPROFILE = JAIL;
 assert.equal(os.homedir(), JAIL, 'HOME must be jailed before any product code loads');
 const STORES = [];
-/** The teardown of a folder and the managers over it (the file's own, and the teardown cell's). */
-function closeThenDelete(dir, hives) {
+/**
+ * The teardown of a folder and the managers over it (the file's own, and the teardown cell's).
+ * Every re-read timer is stopped first (dispose() does not stop it), so no tick can start a read
+ * while another root's read is awaited. Then each root's open archive read is joined (the reads
+ * share one flight per root), and the delete follows the last join synchronously.
+ */
+async function closeThenDelete(dir, hives) {
+  for (const h of hives) { h.stopLedgerGuard(); h.dispose(); }
+  for (const h of hives) await h.drainReads();
+  for (const root of new Set(hives.map((h) => h.root()).filter(Boolean))) await archive.readArchiveTextsAsync(root).catch(() => null);
   rmTree(dir);
-  for (const h of hives) h.dispose();
 }
-test.after(() => {
+test.after(async () => {
   for (const s of STORES) s.close();
   for (const [k, v] of Object.entries(prior)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
-  closeThenDelete(JAIL, HIVES);
+  await closeThenDelete(JAIL, HIVES);
 });
 
 const loadTs = require('./load-ts.cjs');
@@ -43,6 +50,7 @@ const { reconcileQueueForHive } = L('src/main/claims/reconcile.ts');
 const { DEFAULT_KEY_REGISTRY, loadRegistry } = L('src/main/claims/registry.ts');
 const { formatGet, resolveGet } = L('src/main/claims/get.ts');
 const { HiveManager } = L('src/main/hive.ts');
+const archive = L('src/main/taskArchive.ts');
 const { NativeMemoryWiring } = L('src/main/nativeMemory/mainWiring.ts');
 const { hiveTasksFor, taskStatusFor, claimsDepsFor, UNAVAILABLE_RE } = require('./claims-90/claims-deps.cjs');
 const A = require('./claims-90/answerer.cjs');
@@ -73,7 +81,7 @@ async function fixture() {
   HIVES.push(app);
   assert.equal(app.root(), root);
   const child = hiveTasksFor(L, root);
-  HIVES.push(child);
+  HIVES.push(child.hm);
   return { root, store, agents, app, child, ids: { old, cur } };
 }
 const HIVES = [];

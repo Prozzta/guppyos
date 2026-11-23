@@ -23,7 +23,7 @@ const M = [
   ['P2 get is not wired', DEPS, '    get: (_agentId, args) => claimGetOver(read, args),', '    get: undefined,', ['preflight', 'unit']],
   ['P3 history is not wired', DEPS, '    claimHistory: (agentId, id) => claimHistoryOver(read, agentId, id),', '    claimHistory: undefined,', ['preflight', 'unit']],
   ['P4 the answerer may write', DEPS, "    level: () => 'reader',", "    level: () => 'writer',", ['unit']],
-  ['P5 get reads tasks.json without the archive', DEPS, '  return { allTasks: () => hm.allTasks().tasks, dispose: () => hm.dispose() };', '  return { allTasks: () => hm.tasks().tasks, dispose: () => hm.dispose() };', ['unit']],
+  ['P5 get reads tasks.json without the archive', DEPS, '  return { allTasks: () => hm.allTasks().tasks, dispose: () => hm.dispose(), hm };', '  return { allTasks: () => hm.tasks().tasks, dispose: () => hm.dispose(), hm };', ['unit']],
   ['P6 the preflight passes a non-zero exit', ANS, '  if (r.code !== 0) return `exit ${r.code}`;', '  if (false) return `exit ${r.code}`;', ['unit']],
   ['P7 the preflight passes an unanswered verb', ANS, "  if (UNAVAILABLE_RE.test(`${r.stdout}\\n${r.stderr}`)) return 'the build does not answer it';", "  if (false) return 'the build does not answer it';", ['unit']],
   ['P8 the run guard drops the transcript count', ANS, "    transcript: transcriptCalls.filter((c) => UNAVAILABLE_RE.test(c.result?.text ?? '')).length,", '    transcript: 0,', ['unit']],
