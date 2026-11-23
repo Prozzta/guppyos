@@ -872,7 +872,8 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // HEAVY-JOB-CREATE-TIMEOUT-UNHELD-108: + 1 (heavy-job-create-timeout-108). 669 + 1 = 670 (root test/*.test.cjs 623).
   // RIG-ELECTRON-LEG-NOT-ISOLATED-108: + 1 (rig-electron-leg-node-108). 670 + 1 = 671 (root test/*.test.cjs 624). Landed after HEAVY-JOB-CREATE-TIMEOUT-UNHELD-108.
   // FLAKE-BARE-OWNER-CIM-LOOKUP-TIMEOUT-108: + 1 (own-procs-powershell-why). 671 + 1 = 672 (root test/*.test.cjs 625).
-  assert.equal(files.length, 672,`the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // FLAKE-OWN-PROCS-POWERSHELL-EXIT-NEG1-EMPTY-108: + 1 (own-procs-neg1-diag-108). 672 + 1 = 673 (root test/*.test.cjs 626).
+  assert.equal(files.length, 673,`the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');
