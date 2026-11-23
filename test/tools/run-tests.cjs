@@ -559,7 +559,7 @@ function runNodeTest({ rel, extraArgs = [], label, spawn, cwd, timeoutMs, isTTY,
   }
   removeFile(eventsFile);
   removeFile(watchFile);
-  if (backstop) { removeFile(backstopFile); removeFile(startsFile); removeFile(`${startsFile}.kills`); }
+  if (backstop) { removeFile(backstopFile); removeFile(startsFile); removeFile(`${startsFile}.kills`); removeFile(`${startsFile}.stops`); }
   for (const l of lost) {
     err(`[test-runner] ${label}FILE ENDED WITHOUT EXITING (pid ${l.pid}): it was killed from outside or crashed hard, which node --test shows only as an exit code with no test output: ${l.file}`);
     for (const k of l.kills) err(`[test-runner] ${label}  its pid ${l.pid} was named by a kill (${k.via}) from ${k.self ? 'the file itself' : `${k.file || 'an unnamed file'} (pid ${k.pid})`}, ${k.afterMs} ms after it started`);
