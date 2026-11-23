@@ -146,7 +146,8 @@ function powershell(script) {
  * One PowerShell run. When it fails, the error says HOW (FLAKE-BARE-OWNER-CIM-LOOKUP-TIMEOUT-108): Node's own
  * message is only "Command failed: <command>" and TAP prints nothing else, so a timeout, a start-up death under
  * load (status 3221225794 = 0xC0000142, empty stderr) and a script error looked the same. Nothing else changes:
- * same command, same 60 s timeout, no retry. `exe` and `exec` are for tests.
+ * same command, same 60 s timeout, no retry. `exe` and `exec` are for tests. The line also names the child's pid and
+ * the UTC wall time before and after the call, when the failed run had a child.
  */
 function runPowershell(script, { exe = 'powershell.exe', exec = execFileSync } = {}) {
   starts += 1;
@@ -162,7 +163,11 @@ ${script}`;
   } catch (e) {
     const err = e && typeof e === 'object' ? e : new Error(String(e));
     const text = (v) => (v === undefined || v === null ? '' : String(v));
-    const why = `[own-procs powershell #${starts} failed after ${Date.now() - t0} ms: status=${err.status ?? null} signal=${err.signal ?? null} code=${err.code ?? null} stderr=${JSON.stringify(text(err.stderr).slice(0, 400))} stdout=${JSON.stringify(text(err.stdout).slice(0, 200))}]`;
+    const t1 = Date.now();
+    // FLAKE-OWN-PROCS-POWERSHELL-EXIT-NEG1-EMPTY-108: a run that had a child names it and the wall time around the
+    // call, so the Windows PowerShell event log (engine start 400 / stop 403) can be matched to this one process.
+    const child = Number.isInteger(err.pid) ? ` [own-procs powershell child pid=${err.pid} started=${new Date(t0).toISOString()} ended=${new Date(t1).toISOString()}]` : '';
+    const why = `[own-procs powershell #${starts} failed after ${t1 - t0} ms: status=${err.status ?? null} signal=${err.signal ?? null} code=${err.code ?? null} stderr=${JSON.stringify(text(err.stderr).slice(0, 400))} stdout=${JSON.stringify(text(err.stdout).slice(0, 200))}]${child}`;
     try { err.message = `${err.message} ${why}`; } catch { /* read-only message */ }
     err.powershellWhy = why;
     throw err;
