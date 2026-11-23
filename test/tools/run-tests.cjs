@@ -554,7 +554,7 @@ function runNodeTest({ rel, extraArgs = [], label, spawn, cwd, timeoutMs, isTTY,
   const keptDir = path.join(path.dirname(eventsFile), `kept-${path.basename(eventsFile)}`);
   let kept = null;
   if (lost.length) {
-    const records = [eventsFile, watchFile, ...(backstop ? [backstopFile, startsFile, `${startsFile}.kills`] : [])];
+    const records = [eventsFile, watchFile, ...(backstop ? [backstopFile, startsFile, `${startsFile}.kills`, `${startsFile}.stops`] : [])];
     try { kept = keepRecords(keptDir, records); } catch (e) { err(`[test-runner] ${label}could not keep the records in ${keptDir}: ${String(e)}`); }
   }
   removeFile(eventsFile);
