@@ -489,7 +489,10 @@ async function liveRelease(t, o) {
   });
   t.after(() => jobs.dispose());
   assert.equal(lock.acquire(AGENT, BENCH, 'bash cut.sh', 'call-1', true).acquired, true);
-  const wrapped = await jobs.begin(AGENT, { command: o.body }, false, 'call-1');
+  // FLAKE-HEAVY-LOCK-LATE-MEMBER-RECUR-ELECTRON-108: o.lateMember makes the body itself (a member that stamps its own start and end).
+  const member = o.lateMember ? lateMemberFiles(o.lateMember) : null;
+  const body = member ? member.body : o.body;
+  const wrapped = await jobs.begin(AGENT, { command: body }, false, 'call-1');
   assert.ok(wrapped, 'the call is wrapped');
   const id = jobs.ids()[0];
   // INT 1.1.102: cap-199's join writes its shell marker under LOCALAPPDATA; give it a folder of this
@@ -498,7 +501,7 @@ async function liveRelease(t, o) {
   helperDirs.push(local);
   // TEST-BASH-PATH-197: Git Bash by path. A bare `bash` is found only when the suite was started
   // from a Git Bash shell; from PowerShell (a Codex agent) it was `spawn bash ENOENT`.
-  const sh = spawn(gitBash(), ['-c', `${o.joinDelay ? `sleep ${o.joinDelay}; ` : ''}"${exe.replace(/\\/g, '/')}" join ${id} 0 0; ${o.body}`], { stdio: 'ignore', windowsHide: true, env: { ...process.env, LOCALAPPDATA: local } });
+  const sh = spawn(gitBash(), ['-c', `${o.joinDelay ? `sleep ${o.joinDelay}; ` : ''}"${exe.replace(/\\/g, '/')}" join ${id} 0 0; ${body}`], { stdio: 'ignore', windowsHide: true, env: { ...process.env, LOCALAPPDATA: local } });
   shellRef = sh;
   if (o.releaseEarly) setTimeout(() => lock.jobExited(AGENT, 'call-1', id), o.releaseEarly); // test mutant: a product that frees the slot while the job runs
   const t0 = Date.now();
@@ -581,17 +584,32 @@ async function liveRelease(t, o) {
   // FLAKE-LAG197-NOPORT-KILL-FREE-108: the job ends with its LAST process, and the kills run together, so
   // that can be well after the shell's exit. The 6 s window opens at the job's end, not the shell's.
   await killsDone;
-  const jobEndAt = Math.max(exitAt, ...kills.map((k) => k.endedAt ?? 0));
+  // FLAKE-HEAVY-LOCK-LATE-MEMBER-RECUR-ELECTRON-108: the late member's own exit is a FACT read from its stamps, not "3 s
+  // after the shell". The launcher leaves only once the start stamp is written (or the member has died), so the start stamp
+  // is read once, at the shell's exit: a missing one is a red at once, never a wait. The wait for the end stamp is bounded
+  // from the START stamp; an end stamp that never comes is a red too (assertLateMember), never a hang or a pass.
+  if (member) {
+    Object.assign(member, readMemberStamps(member.file));
+    if (member.startAt !== null) {
+      const cap = member.startAt + LATE_MEMBER_END_CAP_MS;
+      while (member.endAt === null && Date.now() < cap) { await new Promise((r) => setTimeout(r, 25)); Object.assign(member, readMemberStamps(member.file)); }
+    }
+  }
+  const memberEnded = !member || member.endAt !== null;
+  // The job ends with its LAST process: for a late member that is its end stamp, and the 6 s window opens there.
+  const jobEndAt = Math.max(exitAt, ...kills.map((k) => k.endedAt ?? 0), member?.endAt ?? 0);
   // No process can die from a kill that has not been sent: the slot is not free before the last one was.
   const lastSent = kills.reduce((m, k) => (k.sentAt !== null && k.sentAt > m.at ? { at: k.sentAt, pid: k.pid } : m), { at: 0, pid: null });   // seeded 0, not exitAt: exitAt is when this process SAW the exit (late under load), not a kill's send time
   const deadline = jobEndAt + 6_000;
-  while (lock.snapshot().length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+  // A late member with a stamp missing is not watched at all: there is no exit to open the window at.
+  while (memberEnded && lock.snapshot().length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
   const rel = rows.find((r) => r.kind === 'heavy-lock' && r.action === 'release');
-  // Diagnostic only, and only for a slot that was not freed: who is still in the job. Read after `rel`, so the list's own
-  // time cannot turn a missing release into a found one; kept out of `lists`, which records the kill's lists.
+  // Diagnostic only, and only for a slot that was not freed (or a late member with a stamp missing): who is still in the
+  // job. Read after `rel`, so the list's own time cannot turn a missing release into a found one; kept out of `lists`,
+  // which records the kill's lists.
   let stillIn = null;
-  if (!rel) { stillIn = await listOnce(); lists.pop(); }
-  return { helperTrace, stillIn, lagMs: rel ? rel.ts - exitAt : null, relAt: rel ? rel.ts : null, lastSentAt: lastSent.at, lastSentPid: lastSent.pid, afterEndMs: rel ? rel.ts - jobEndAt : null, exitAt, jobEndAt, runMs: exitAt - t0, heldMs: rel ? rel.heldMs : null, reason: rel ? rel.reason : null, rows, shellAliveAtRelease, code: exit.code, signal: exit.signal, kills, shellPid: sh.pid, lists, t0 };
+  if (!rel || !memberEnded) { stillIn = await listOnce(); lists.pop(); }
+  return { member, helperTrace, stillIn, lagMs: rel ? rel.ts - exitAt : null, relAt: rel ? rel.ts : null, lastSentAt: lastSent.at, lastSentPid: lastSent.pid, afterEndMs: rel ? rel.ts - jobEndAt : null, exitAt, jobEndAt, runMs: exitAt - t0, heldMs: rel ? rel.heldMs : null, reason: rel ? rel.reason : null, rows, shellAliveAtRelease, code: exit.code, signal: exit.signal, kills, shellPid: sh.pid, lists, t0 };
 }
 
 // What this process reads from a Git Bash shell that taskkill /F ended: exit code 1, no signal.
@@ -691,12 +709,83 @@ async function closeWhileRunning(t, exe) {
 
 /** A member the watcher's first snapshot cannot hold: a detached node started 1 s in, with a console
  *  of its own, that runs 3 s more. (A plain `sleep 3 &` shares the shell's console host, which is in
- *  the first snapshot and lives as long as the sleep does: the re-query would never be needed.) */
-const LATE_MEMBER_BODY = `sleep 1; node -e "require('child_process').spawn(process.execPath,['-e','setTimeout(()=>{},3000)'],{detached:true,stdio:'ignore',windowsHide:true}).unref()"`;
-/** The shell exits at ~1 s, the late member ~3 s after that. */
+ *  the first snapshot and lives as long as the sleep does: the re-query would never be needed.)
+ *
+ *  FLAKE-HEAVY-LOCK-LATE-MEMBER-RECUR-ELECTRON-108: the member stamps its own start and end. The cell used to clock the
+ *  release from the SHELL's exit and assume the member ended 3 s after it; the member's 3 s only start once the detached
+ *  node has booted, so under suite load the test timed that boot (freed 3049..5163 ms "after the shell" in 50 green legs,
+ *  and "not freed 6 s after the shell" in the red). Now:
+ *  - the member (a file, not `-e`) writes `start <pid> <Date.now()>` at its first line and `end <pid> <Date.now()>` in its
+ *    'exit' handler, the last point it can write at, to a stamp file in a folder of this cell's own;
+ *  - the launcher leaves only when the start stamp is there, or the member has died: a fact, no boot time is assumed. So
+ *    the shell's exit comes after the member's start, and the test reads the start stamp once, at the shell's exit;
+ *  - `only`: red-before only, a member that writes just that one stamp. */
+const LATE_MEMBER_SOURCE = (only) => `const startAt = Date.now();
+const fs = require('fs');
+const stamp = process.argv[2];
+${only === 'end' ? '' : "fs.appendFileSync(stamp, 'start ' + process.pid + ' ' + startAt + '\\n');"}
+${only === 'start' ? '' : "process.on('exit', () => { fs.appendFileSync(stamp, 'end ' + process.pid + ' ' + Date.now() + '\\n'); });"}
+setTimeout(() => {}, 3000);
+`;
+const LATE_LAUNCHER_SOURCE = `const fs = require('fs');
+const [member, stamp] = process.argv.slice(2);
+const c = require('child_process').spawn(process.execPath, [member, stamp], { detached: true, stdio: 'ignore', windowsHide: true });
+const leave = (code) => { c.unref(); process.exit(code); };
+c.on('error', () => leave(4));
+c.on('exit', () => leave(3));
+setInterval(() => { let s = ''; try { s = fs.readFileSync(stamp, 'utf8'); } catch { /* not written yet */ } if (s.startsWith('start ') && s.includes('\\n')) leave(0); }, 25);
+`;
+/** Once the member has started, its end stamp must be there within this: its own 3 s timer and as much again. An end stamp
+ *  that has not come by then is a red of its own; the wait is never open-ended. (The file's 6 s watch, anchored at the
+ *  member's START stamp instead of the shell's exit.) */
+const LATE_MEMBER_END_CAP_MS = 6_000;
+function lateMemberFiles(kind) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hlr197-member-'));
+  helperDirs.push(dir);
+  const unix = (p) => p.replace(/\\/g, '/');
+  const file = path.join(dir, 'stamps.txt');
+  fs.writeFileSync(path.join(dir, 'member.cjs'), LATE_MEMBER_SOURCE(kind && kind.only));
+  fs.writeFileSync(path.join(dir, 'launcher.cjs'), LATE_LAUNCHER_SOURCE);
+  return { file, raw: null, startAt: null, endAt: null, pid: null, body: `sleep 1; node "${unix(path.join(dir, 'launcher.cjs'))}" "${unix(path.join(dir, 'member.cjs'))}" "${unix(file)}"` };
+}
+/** The stamp file as facts. Only whole lines count (a line still being written has no newline yet); a line that does not
+ *  parse, or an end stamp from another pid than the start's, leaves its stamp null: red, never skipped. */
+function parseMemberStamps(raw) {
+  const m = { raw, startAt: null, endAt: null, pid: null };
+  const lines = String(raw ?? '').split('\n').slice(0, -1);
+  for (const line of lines) {
+    const x = /^(start|end) (\d+) (\d+)$/.exec(line);
+    if (!x) continue;
+    if (x[1] === 'start' && m.startAt === null) { m.startAt = Number(x[3]); m.pid = Number(x[2]); }
+    if (x[1] === 'end' && m.endAt === null && m.pid === Number(x[2])) m.endAt = Number(x[3]);
+  }
+  return m;
+}
+function readMemberStamps(file) {
+  let raw = null;
+  try { raw = fs.readFileSync(file, 'utf8'); } catch { /* no stamp file: raw stays null */ }
+  return parseMemberStamps(raw);
+}
+/** Both stamps as ms from the shell's exit, for the diagnostic line and every late-member red. */
+function memberText(r) {
+  const m = r.member;
+  if (!m) return 'no late member';
+  const at = (v) => (v === null ? 'none' : `${v - r.exitAt} ms`);
+  return `member pid ${m.pid}, start stamp ${at(m.startAt)}, end stamp ${at(m.endAt)} (from the shell's exit), stamp file ${JSON.stringify(m.raw)}`;
+}
+/** One clock for all of it (this box's Date.now): the member's stamps and the release row's time.
+ *  - the stamps are facts: a missing or unparseable one is its own red;
+ *  - the slot is kept until the member's end stamp. The stamp is written before the process is truly gone, so a right
+ *    product can never release before it;
+ *  - the slot is freed within 2 s of the end stamp: the product's bound, from the member's real exit. */
 function assertLateMember(r) {
-  assert.ok(r.lagMs === null || r.lagMs >= 1_500, `A MEMBER THAT JOINED AFTER THE SNAPSHOT KEEPS THE SLOT (freed ${r.lagMs} ms after the shell, the member runs 3 s more)`);
-  assert.ok(r.lagMs !== null && r.lagMs < 5_000, `THE SLOT IS FREED WITHIN 2 S OF THE LATE MEMBER'S EXIT (${r.lagMs === null ? 'not freed 6 s after the shell' : `freed ${r.lagMs} ms after the shell`}, the member ends 3 s after it)`);
+  const m = r.member;
+  const tail = `; ${memberText(r)}; shell exit code ${r.code}${notFreedText(r)}`;
+  assert.ok(m && m.startAt !== null, `THE LATE MEMBER WROTE ITS START STAMP (none at the shell's exit${tail})`);
+  assert.ok(m.endAt !== null, `THE LATE MEMBER WROTE ITS END STAMP (none ${LATE_MEMBER_END_CAP_MS} ms after its start stamp${tail})`);
+  assert.ok(r.relAt === null || r.relAt >= m.endAt, `A MEMBER THAT JOINED AFTER THE SNAPSHOT KEEPS THE SLOT (freed ${m.endAt - r.relAt} ms before the member's end stamp${tail})`);
+  const after = r.relAt === null ? null : r.relAt - m.endAt;
+  assert.ok(after !== null && after < 2_000, `THE SLOT IS FREED WITHIN 2 S OF THE LATE MEMBER'S EXIT (${after === null ? "not freed 6 s after the member's end stamp" : `freed ${after} ms after the member's end stamp`}${tail})`);
   assert.equal(r.reason, 'job-exit');
 }
 
@@ -851,10 +940,54 @@ test('the killed check fails a shell that ran out on its own, and one nothing wa
 });
 
 test('LIVE: a member that joins after a snapshot keeps the slot until its own exit', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
-  const r = await liveRelease(t, { body: LATE_MEMBER_BODY, exe: helper(t, noPortNoticesHelperSource()) });
-  t.diagnostic(`late member: shell ran ${r.runMs} ms, slot freed ${r.lagMs} ms after the shell exit`);
+  const r = await liveRelease(t, { lateMember: true, exe: helper(t, noPortNoticesHelperSource()) });
+  t.diagnostic(`late member: shell ran ${r.runMs} ms, slot freed ${r.lagMs} ms after the shell exit, ${r.relAt === null || !r.member || r.member.endAt === null ? 'null' : r.relAt - r.member.endAt} ms after the member's end stamp; ${memberText(r)}`);
   assertLateMember(r);
   assertWatcherClosed(r, 'late member');
+});
+
+// FLAKE-HEAVY-LOCK-LATE-MEMBER-RECUR-ELECTRON-108, red-before: each assert of the late-member check dies for its own
+// reason. (The slot that is never freed is the census's 'the member watcher skips its empty-confirm re-query'.)
+test('the late-member stamps: only whole, parseable lines of one pid are facts', () => {
+  assert.deepEqual(parseMemberStamps('start 7 1000\nend 7 4000\n'), { raw: 'start 7 1000\nend 7 4000\n', startAt: 1000, endAt: 4000, pid: 7 });
+  assert.equal(parseMemberStamps(null).startAt, null);
+  assert.equal(parseMemberStamps('').startAt, null);
+  assert.equal(parseMemberStamps('start 7 10').startAt, null, 'a line still being written is not a stamp');
+  assert.equal(parseMemberStamps('start 7 1000\nend 7 40').endAt, null, 'a line still being written is not a stamp');
+  assert.equal(parseMemberStamps('start 7 x\n').startAt, null, 'an unparseable start is no start');
+  assert.equal(parseMemberStamps('start 7 1000\nend 7 soon\n').endAt, null, 'an unparseable end is no end');
+  assert.equal(parseMemberStamps('start 7 1000\nend 8 4000\n').endAt, null, "another pid's end is no end");
+  assert.equal(parseMemberStamps('end 7 4000\n').endAt, null, 'an end with no start is no end');
+});
+
+test('the late-member check fails a missing stamp, an early release, a late release and no release, each by name', () => {
+  const T = 1_000_000;
+  const base = { exitAt: T, code: 0, rows: [], helperTrace: [], stillIn: null, reason: 'job-exit', member: { raw: 'x', pid: 7, startAt: T - 200, endAt: T + 2_800 }, relAt: T + 2_850 };
+  assert.doesNotThrow(() => assertLateMember(base));
+  // the suite's red, as it reads now: a member that booted 3.5 s late is still judged from its own exit
+  assert.doesNotThrow(() => assertLateMember({ ...base, member: { ...base.member, endAt: T + 6_300 }, relAt: T + 6_350 }));
+  assert.doesNotThrow(() => assertLateMember({ ...base, relAt: base.member.endAt }));
+  assert.doesNotThrow(() => assertLateMember({ ...base, relAt: base.member.endAt + 1_999 }));
+  assert.throws(() => assertLateMember({ ...base, member: null }), /THE LATE MEMBER WROTE ITS START STAMP/);
+  assert.throws(() => assertLateMember({ ...base, member: { ...base.member, startAt: null, endAt: null } }), /THE LATE MEMBER WROTE ITS START STAMP \(none at the shell's exit; member pid 7, start stamp none, end stamp none/);
+  assert.throws(() => assertLateMember({ ...base, member: { ...base.member, endAt: null }, relAt: null }), /THE LATE MEMBER WROTE ITS END STAMP \(none 6000 ms after its start stamp; .*in the job at the deadline: not listed; rows: none/);
+  assert.throws(() => assertLateMember({ ...base, relAt: base.member.endAt - 1 }), /A MEMBER THAT JOINED AFTER THE SNAPSHOT KEEPS THE SLOT \(freed 1 ms before the member's end stamp/);
+  assert.throws(() => assertLateMember({ ...base, relAt: base.member.endAt + 2_000 }), /THE SLOT IS FREED WITHIN 2 S OF THE LATE MEMBER'S EXIT \(freed 2000 ms after the member's end stamp/);
+  assert.throws(() => assertLateMember({ ...base, relAt: null, stillIn: { error: null, code: 0, ms: 40, rows: 1, pids: [7], unparsed: 0 } }), /THE SLOT IS FREED WITHIN 2 S OF THE LATE MEMBER'S EXIT \(not freed 6 s after the member's end stamp; .*in the job at the deadline: list exit 0 in 40 ms, 1 rows \[7\]/);
+});
+
+test('LIVE: the late-member check goes red on a slot freed while the member runs, and on a member that leaves a stamp out', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
+  // test mutant: a product that frees the slot 1.5 s in (about the shell's exit), with the late member still running
+  const early = await liveRelease(t, { lateMember: true, releaseEarly: 1_500 });
+  t.diagnostic(`freed early: ${early.relAt - early.member.endAt} ms from the member's end stamp; ${memberText(early)}`);
+  assert.throws(() => assertLateMember(early), /A MEMBER THAT JOINED AFTER THE SNAPSHOT KEEPS THE SLOT \(freed \d+ ms before the member's end stamp/);
+  // a member with no start stamp: the launcher leaves when the member has died, and the red is the stamp's, at once
+  const noStart = await liveRelease(t, { lateMember: { only: 'end' } });
+  assert.throws(() => assertLateMember(noStart), /THE LATE MEMBER WROTE ITS START STAMP/);
+  // a member with no end stamp: the wait stops at the cap from its start stamp, and the red is the stamp's
+  const noEnd = await liveRelease(t, { lateMember: { only: 'start' } });
+  t.diagnostic(`no end stamp: gave up ${Date.now() - noEnd.member.startAt} ms after the start stamp; ${memberText(noEnd)}`);
+  assert.throws(() => assertLateMember(noEnd), /THE LATE MEMBER WROTE ITS END STAMP/);
 });
 
 test('LIVE: the completion port alone still frees the slot within 2 s (no member watcher)', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
@@ -1054,7 +1187,7 @@ const HELPER_MUTANTS = [
     // late member and keeps the slot, and no second report ever comes.
     name: 'the member watcher skips its empty-confirm re-query',
     edits: [['                    if (handles.Count != 0) System.Threading.Thread.Sleep(25);', '                    if (handles.Count != 0) System.Threading.Thread.Sleep(25); else { Write("{\\"event\\":\\"exit\\",\\"job\\":\\"" + id + "\\",\\"msg\\":4,\\"pid\\":0}"); return; }']],
-    body: LATE_MEMBER_BODY, noPort: true, verify: assertLateMember, dies: /THE SLOT IS FREED WITHIN 2 S OF THE LATE MEMBER'S EXIT/
+    lateMember: true, noPort: true, verify: assertLateMember, dies: /THE SLOT IS FREED WITHIN 2 S OF THE LATE MEMBER'S EXIT/
   },
   {
     name: 'an exited member handle is left open',
@@ -1089,7 +1222,7 @@ test('MUTANT CENSUS: every mutant applies once and dies at the assertion that na
       const exe = helper(tt, source);
       await assert.rejects(async () => {
         if (m.closeEarly) return assertHandlesClosed(await closeWhileRunning(tt, exe), 'closed early');
-        const r = await liveRelease(tt, { exe, body: m.body, kill: m.kill });
+        const r = await liveRelease(tt, { exe, body: m.body, kill: m.kill, lateMember: m.lateMember });
         tt.diagnostic(`ran ${r.runMs} ms, ${r.lagMs === null ? 'not freed 6 s after the exit' : `freed ${r.lagMs} ms after the exit`}; ${JSON.stringify(r.rows.filter((x) => x.kind === 'heavy-cpu').map((x) => [x.action, x.what, x.by, x.opened, x.closed]))}`);
         if (m.verify) m.verify(r); else assertFreed(r, m.what);
       }, (e) => {
