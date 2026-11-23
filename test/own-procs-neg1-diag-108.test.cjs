@@ -157,3 +157,27 @@ test('(b) the runner removes the stops journal with its other record files at th
   assert.ok(removed.includes('ev.jsonl.starts.kills'), 'the kills record is cleaned up, as before');
   assert.ok(removed.includes('ev.jsonl.starts.stops'), 'and so is the stops journal');
 });
+
+// Jim 4ba1e5 (MUST): the stops journal is kill evidence for a lost file, as <starts>.kills is, so
+// RUNNER-KEEP-RECORDS keeps a copy of it too, before the cleanup removes it.
+test('(b) a file that ended without exiting: the stops journal is kept with the other records, before it is removed', () => {
+  const order = [];
+  const files = { 'ev.jsonl.starts': JSON.stringify({ pid: 11, bornMs: 1000, file: 'victim.test.cjs', name: 'node.exe' }) };
+  runner.runNodeTest({ rel: ['x'], label: '', spawn: () => ({ status: 1 }), cwd: '.', timeoutMs: 5, isTTY: false, env: {},
+    eventsFile: 'ev.jsonl', readFile: (f) => files[f] || '', removeFile: (f) => order.push(['rm', f]), watchdog: () => ({ stop: () => {} }),
+    backstop: () => ({ opt: '', env: {}, stop: () => {} }), err: () => {}, now: () => 9000,
+    keepRecords: (dir, kept) => { order.push(['keep', ...kept]); return kept; } });
+  const keeps = order.filter((o) => o[0] === 'keep');
+  assert.equal(keeps.length, 1, `the lost file's records are kept once: ${JSON.stringify(order)}`);
+  assert.ok(keeps[0].includes('ev.jsonl.starts.kills'), 'the kills record is kept, as before');
+  assert.ok(keeps[0].includes('ev.jsonl.starts.stops'), 'and so is the stops journal');
+  assert.ok(order.findIndex((o) => o[0] === 'keep') < order.findIndex((o) => o[1] === 'ev.jsonl.starts.stops' && o[0] === 'rm'), 'kept before it is removed');
+});
+
+// Jim 4ba1e5 (NIT 2): a spawn that itself failed gives pid 0. That is no child: no block, and no journal lookup.
+test('(a) a failed spawn (pid 0) names no child and reads no journal', () => {
+  const err = withBackstop({ stops: path.join(os.tmpdir(), 'own-procs-neg1-never-read.stops'), file: 'x.test.cjs' }, () => failWith(0));
+  assert.ok(err, 'it still throws');
+  assert.ok(err.message.endsWith('stdout=""]'), `nothing follows the failure line: ${err.message}`);
+  assert.doesNotMatch(err.message, /own-procs powershell child|own-procs stops/);
+});
