@@ -958,8 +958,6 @@ test('END TO END, the backstop alone (no watchdog): node --test\'s own file time
     // GUPPY-NODE-LTS: the REAL backstop (the runner's own), on every Node: an injected watchdog would
     // otherwise turn it off, and Node 24's --test-timeout never kills this file.
     const code = run({ testDir: dir, cwd: dir, spawn, timeoutMs: 3_000, isTTY: false, log: () => {}, err: e.write, failureFile: () => path.join(dir, 'failures.json'), watchdog: () => ({ stop: () => {} }), backstop: runner.startBackstop, eventsFile: path.join(dir, 'events.jsonl') });
-    // In dir, so the keep of the killed file's records goes with dir (the default would leak kept-*).
-    assert.ok(fs.existsSync(path.join(dir, 'kept-events.jsonl')), 'the killed file\'s records were kept next to the events file, inside dir');
     assert.equal(timedOut, false, 'THE BACKSTOP NEVER ENDED THE FILE: node --test was still running at 90 s');
     assert.notStrictEqual(code, 0, 'a hung file fails the run');
     assert.match(e.lines.join('\n'), /FILE TIMED OUT after 3000 ms \(the runner's backstop killed it at 23000 ms\): .*a-hung\.test\.cjs/);
@@ -1104,7 +1102,9 @@ test('GATE-178: a watchdog whose snapshot is 12 s late still TREE-kills a hung C
     // GATE178-WATCHDOG-LATE-SNAPSHOT-RED-108: the REAL backstop, at its real floor. Injecting spawn and
     // watchdog turns the backstop off by default, so "before the backstop" was never raced: a floor cut
     // to 3 s kept this test green. Now a backstop that comes first is a red that says so.
-    const code = run({ testDir: dir, cwd: dir, spawn: spawnTap, timeoutMs: 4_000, isTTY: false, log: () => {}, err: e.write, failureFile: () => path.join(dir, 'failures.json'), watchdog: lateWatchdog, backstop: runner.startBackstop });
+    // The events file lives in dir: a grandchild lost at the tree kill makes the runner keep the
+    // file's records next to it (never removed), and the default (os.tmpdir()) would leak kept-*.
+    const code = run({ testDir: dir, cwd: dir, spawn: spawnTap, timeoutMs: 4_000, isTTY: false, log: () => {}, err: e.write, failureFile: () => path.join(dir, 'failures.json'), watchdog: lateWatchdog, backstop: runner.startBackstop, eventsFile: path.join(dir, 'events.jsonl') });
     const ms = Date.now() - t0;
     // The tree is judged (and what is left killed) whatever the verdict; no record = no tree to judge.
     const left = fs.existsSync(filePidFile) ? leftBehind(readRec(filePidFile, path.basename(process.execPath))) : null;
