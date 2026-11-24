@@ -42,6 +42,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { run } = require('./electron-rmsync-link-safe-child.cjs');
+const { consoleNode } = require('./tools/console-node.cjs');
 
 const jail = fs.mkdtempSync(path.join(os.tmpdir(), 'rmsync-link-safe-'));
 // The jail holds junctions when a test fails half way: remove them as links before the folder.
@@ -187,10 +188,23 @@ const buildRuntimeRm = (base) => {
 };
 const UNTOUCHED = ['keep.txt', 'sub'];
 
-test('RUNTIME PIN, plain Node: a recursive rm of a junction removes the link only, sync and async', async () => {
+/** ELECTRON-LEG-HARNESS-ENV-108: the plain-Node pin runs in a console Node child on BOTH legs. In
+ *  this process it measured Electron's rm on the Electron leg (process.execPath is electron.exe there). */
+const inPlainNode = (site, base) => {
+  const node = consoleNode();
+  const script = 'require(process.argv[1]).run(process.argv[2], process.argv[3]).then((out) => process.stdout.write(JSON.stringify({ electron: process.versions.electron || null, out })))';
+  const r = child.spawnSync(node.file, ['-e', script, path.join(__dirname, 'electron-rmsync-link-safe-child.cjs'), site, base],
+    { env: { ...process.env }, encoding: 'utf8', timeout: 60_000, windowsHide: true });
+  assert.equal(r.status, 0, `plain Node child (${node.file}) exit ${r.status}: ${r.stderr || r.stdout}`);
+  const res = JSON.parse(r.stdout);
+  assert.equal(res.electron, null, 'the child really ran in plain Node');
+  return res.out;
+};
+
+test('RUNTIME PIN, plain Node: a recursive rm of a junction removes the link only, sync and async', () => {
   const base = path.join(jail, 'runtime-rm-node');
   buildRuntimeRm(base);
-  assert.deepEqual(await run('runtime-rm', base), {
+  assert.deepEqual(inPlainNode('runtime-rm', base), {
     sync: { linkGone: true, target: UNTOUCHED },
     async: { linkGone: true, target: UNTOUCHED }
   });

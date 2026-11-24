@@ -210,9 +210,22 @@ test('the preload leaves child_process as callers read it: names, util.promisify
       "  console.log(JSON.stringify({ names, promisified: Object.keys(r).sort(), sync: s.status }));",
       '});',
     ].join('\n');
-    const r = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', env: { ...process.env, NODE_TEST_CONTEXT: 'child-v8', NODE_OPTIONS: opt, GUPPY_FILE_BACKSTOP: out, GUPPY_FILE_BACKSTOP_OPT: opt } });
+    // ELECTRON-LEG-HARNESS-ENV-108 (Jim MUST 1): a same-runtime control. The script runs twice under
+    // process.execPath (electron.exe as Node on the Electron leg, the runtime every test file there
+    // gets this preload in), without and with the preload, and the two must read child_process the
+    // same. The runtime's own names are not hard-coded on that leg; the Node leg keeps the list too.
+    const plain = nodeEnv({ ...process.env, NODE_TEST_CONTEXT: 'child-v8' });
+    for (const k of ['NODE_OPTIONS', 'GUPPY_FILE_BACKSTOP', 'GUPPY_FILE_BACKSTOP_OPT']) delete plain[k];
+    const control = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', env: plain });
+    assert.equal(control.status, 0, `the control (no preload): ${control.stderr}`);
+    const r = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', env: nodeEnv({ ...plain, NODE_OPTIONS: opt, GUPPY_FILE_BACKSTOP: out, GUPPY_FILE_BACKSTOP_OPT: opt }) });
     assert.equal(r.status, 0, r.stderr);
-    assert.deepEqual(JSON.parse(r.stdout.trim().split('\n').pop()), { names: ['spawn', 'spawnSync', 'execFile', 'execFileSync', 'exec', 'execSync'], promisified: ['stderr', 'stdout'], sync: 0 });
+    const without = JSON.parse(control.stdout.trim().split('\n').pop());
+    const withPreload = JSON.parse(r.stdout.trim().split('\n').pop());
+    assert.deepEqual(withPreload, without, 'the preload changes nothing a caller of child_process reads (same runtime, without and with it)');
+    if (!process.versions.electron) {
+      assert.deepEqual(withPreload, { names: ['spawn', 'spawnSync', 'execFile', 'execFileSync', 'exec', 'execSync'], promisified: ['stderr', 'stdout'], sync: 0 });
+    }
     const kills = fs.existsSync(`${out}.kills`) ? fs.readFileSync(`${out}.kills`, 'utf8').trim().split('\n').map((l) => JSON.parse(l)) : [];
     assert.deepEqual(kills.map((k) => [k.via, k.targets]), [['taskkill', [4242]]], 'a liveness probe (signal 0) is not recorded; a command naming taskkill and a pid is');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
