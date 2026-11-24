@@ -65,7 +65,18 @@
 //                            handoff form (a tree patched before this stage existed) -> close ->
 //                            the same.
 //
-//   --check          change nothing; exit 1 unless all four files are in their patched form
+// PTY-NATURAL-EXIT-JOIN adds a fifth file and one more agent edit.
+//   lib/windowsTerminal.js   node-pty emitted 'exit' at the output socket's close, with the code read
+//                            then; the native exit report that sets the code can run later, so a
+//                            natural exit could carry undefined. Patched, the close leaves the exit
+//                            to the report when the report is proven to be on its way (the root
+//                            has ended), and the report emits it as its last step. The comment in the
+//                            patched file names the proof and the residuals.
+//                            pristine -> patch -> must equal TERMINAL_JS_JOIN_SHA256.
+//   lib/windowsPtyAgent.js   a tree patched before this stage (AGENT_JS_PRE_JOIN_SHA256) gets only
+//                            the new edit.
+//
+//   --check          change nothing; exit 1 unless all five files are in their patched form
 //   --root <dir>     another node-pty tree (the self-test only)
 // Any other argument is refused: this tool rewrites files, so it never guesses.
 const fs = require('node:fs');
@@ -191,8 +202,13 @@ const AGENT_EDITS = [
     '            else {\n' +
     '                this._outSocket.once(\'pause\', guppyUnread);\n' +
     '            }\n' +
-    '        }\n']
+    '        }\n'],
+  // PTY-NATURAL-EXIT-JOIN: the exit the terminal's close left here is emitted last, with the code set.
+  ...pins.AGENT_JS_JOIN_EDITS
 ];
+// PTY-NATURAL-EXIT-JOIN: the terminal reports a natural exit only once both the output close and the
+// exit code have arrived. The edits live in the pins module, so that a test can take them back out.
+const TERMINAL_EDITS = pins.TERMINAL_JS_EDITS;
 // NODEPTY-PACKAGED-PROOF: on Windows the loader takes the binaries built in this tree, or throws.
 const UTILS_EDITS = [
   ['never look in prebuilds/ on Windows',
@@ -218,7 +234,10 @@ const targets = [
   { rel: ['src', 'win', 'conpty.cc'], from: pins.CONPTY_CC_PATCHED_SHA256, fromName: 'the #922-patched form (run patch-node-pty-race-fix.cjs first)', to: pins.CONPTY_CC_BUILT_SHA256, edits: [...CONPTY_EDITS, ...pins.CONPTY_CC_CLOSE_EDITS],
     // A tree patched before PTY-CONHOST-LEAK-NATIVE has the handoff already: only the close is added.
     also: [{ from: pins.CONPTY_CC_HANDOFF_SHA256, edits: pins.CONPTY_CC_CLOSE_EDITS }] },
-  { rel: ['lib', 'windowsPtyAgent.js'], from: pins.AGENT_JS_PRISTINE_SHA256, fromName: 'pristine 1.1.0', to: pins.AGENT_JS_HANDOFF_SHA256, edits: AGENT_EDITS },
+  { rel: ['lib', 'windowsPtyAgent.js'], from: pins.AGENT_JS_PRISTINE_SHA256, fromName: 'pristine 1.1.0', to: pins.AGENT_JS_HANDOFF_SHA256, edits: AGENT_EDITS,
+    // A tree patched before PTY-NATURAL-EXIT-JOIN has every other agent edit: only the last is added.
+    also: [{ from: pins.AGENT_JS_PRE_JOIN_SHA256, edits: AGENT_EDITS.slice(-1) }] },
+  { rel: ['lib', 'windowsTerminal.js'], from: pins.TERMINAL_JS_PRISTINE_SHA256, fromName: 'pristine 1.1.0', to: pins.TERMINAL_JS_JOIN_SHA256, edits: TERMINAL_EDITS },
   { rel: ['lib', 'utils.js'], from: pins.UTILS_JS_PRISTINE_SHA256, fromName: 'pristine 1.1.0', to: pins.UTILS_JS_BUILT_ONLY_SHA256, edits: UTILS_EDITS },
   { rel: ['lib', 'worker', 'conoutSocketWorker.js'], from: pins.WORKER_JS_PRISTINE_SHA256, fromName: 'pristine 1.1.0', to: pins.WORKER_JS_QUIET_SHA256, edits: pins.WORKER_JS_EDITS }
 ];
@@ -245,6 +264,6 @@ for (const t of targets) {
   writes.push([file, source]);
 }
 for (const [file, source] of writes) fs.writeFileSync(file, source, 'utf8');
-if (check) console.log(`${TAG} node-pty hands over the root handle, closes the pseudoconsole of an ended terminal, loads built binaries only and its output worker handles socket errors (conpty.cc, windowsPtyAgent.js, utils.js, worker/conoutSocketWorker.js)`);
+if (check) console.log(`${TAG} node-pty hands over the root handle, closes the pseudoconsole of an ended terminal, loads built binaries only, its output worker handles socket errors and a natural exit carries its code (conpty.cc, windowsPtyAgent.js, utils.js, worker/conoutSocketWorker.js, windowsTerminal.js)`);
 else if (writes.length === 0) console.log(`${TAG} root-handle handoff already applied`);
 else console.log(`${TAG} applied the root-handle handoff to node-pty ${version} (${writes.length} file(s))`);

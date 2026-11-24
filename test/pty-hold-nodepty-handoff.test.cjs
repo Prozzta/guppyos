@@ -177,6 +177,12 @@ if (!WIN) {
   const HINT = 'Run `npm run postinstall` in this tree (npm install does): it patches node-pty and rebuilds it.';
   const builtCc = fs.readFileSync(path.join(NP, 'src', 'win', 'conpty.cc'), 'utf8');
   const handoffJs = fs.readFileSync(path.join(NP, 'lib', 'windowsPtyAgent.js'), 'utf8');
+  // PTY-NATURAL-EXIT-JOIN: the terminal, and the agent without the join's last edit, by their pinned
+  // edits taken back out (last edit first).
+  const unedit = (text, edits) => [...edits].reverse().reduce((s, [, before, after]) => s.replace(after, () => before), text);
+  const builtTerminal = fs.readFileSync(path.join(NP, 'lib', 'windowsTerminal.js'), 'utf8');
+  const pristineTerminal = unedit(builtTerminal, pins.TERMINAL_JS_EDITS);
+  const preJoinJs = unedit(handoffJs, pins.AGENT_JS_JOIN_EDITS);
   // The patch, undone by its own words: everything from its comment to the watcher's start, and the
   // property it sets; in the JS, its two lines.
   // PTY-CONHOST-LEAK-NATIVE: the close on exit is the last stage; taken back out by its pinned
@@ -192,7 +198,7 @@ if (!WIN) {
     .replace(/ {4}if \(guppyBuiltOnly\) \{\n {8}throw new Error\("Guppy: [^\n]*\n {4}\}\n/, '');
   // (PTY-CONHOST-LEAK-NATIVE added the bundled-host exit block; it is taken out whole, by its own words.)
   // (And the close-not-started report: its argument in two places and the block that reads it.)
-  const pristineJs = handoffJs.replace(/ {8}else \{\n {12}\/\/ GUPPY PTY-CONHOST-LEAK-NATIVE[\s\S]*?\n {8}\}\n/, '')
+  const pristineJs = preJoinJs.replace(/ {8}else \{\n {12}\/\/ GUPPY PTY-CONHOST-LEAK-NATIVE[\s\S]*?\n {8}\}\n/, '')
     .replace('function (c, guppyCloseUnstarted) { return _this._$onProcessExit(c, guppyCloseUnstarted); }', 'function (c) { return _this._$onProcessExit(c); }')
     .replace('function (exitCode, guppyCloseUnstarted) {', 'function (exitCode) {')
     .replace(/ {8}\/\/ GUPPY PTY-CONHOST-LEAK-NATIVE \(tools\/patch-node-pty-root-handle\.cjs\): the output worker[\s\S]*?\n {8}if \(guppyCloseUnstarted === true\) \{\n[^\n]*\n {8}\}\n/, '').split('\n').filter((l) => !/GUPPY PTY-HOLD-NODEPTY-HANDOFF|this\._rootHandle = connect\.rootHandle;/.test(l)).join('\n');
@@ -201,7 +207,7 @@ if (!WIN) {
   const builtWorker = fs.readFileSync(path.join(NP, 'lib', 'worker', 'conoutSocketWorker.js'), 'utf8');
   const pristineWorker = pins.WORKER_JS_EDITS.reduce((s, [, before, after]) => s.replace(after, () => before), builtWorker);
 
-  const tree = (cc, js, { version = pins.NODE_PTY_VERSION, utils = pristineUtils, worker = pristineWorker } = {}) => {
+  const tree = (cc, js, { version = pins.NODE_PTY_VERSION, utils = pristineUtils, worker = pristineWorker, terminal = pristineTerminal } = {}) => {
     const dir = tempDir('phnh-tree-');
     fs.mkdirSync(path.join(dir, 'src', 'win'), { recursive: true });
     fs.mkdirSync(path.join(dir, 'lib'), { recursive: true });
@@ -211,10 +217,11 @@ if (!WIN) {
     fs.writeFileSync(path.join(dir, 'lib', 'utils.js'), utils);
     fs.mkdirSync(path.join(dir, 'lib', 'worker'), { recursive: true });
     fs.writeFileSync(path.join(dir, 'lib', 'worker', 'conoutSocketWorker.js'), worker);
+    fs.writeFileSync(path.join(dir, 'lib', 'windowsTerminal.js'), terminal);
     return dir;
   };
-  const shas = (dir) => [['src', 'win', 'conpty.cc'], ['lib', 'windowsPtyAgent.js'], ['lib', 'utils.js'], ['lib', 'worker', 'conoutSocketWorker.js']].map((rel) => sha(fs.readFileSync(path.join(dir, ...rel))));
-  const DONE = [pins.CONPTY_CC_BUILT_SHA256, pins.AGENT_JS_HANDOFF_SHA256, pins.UTILS_JS_BUILT_ONLY_SHA256, pins.WORKER_JS_QUIET_SHA256];
+  const shas = (dir) => [['src', 'win', 'conpty.cc'], ['lib', 'windowsPtyAgent.js'], ['lib', 'utils.js'], ['lib', 'worker', 'conoutSocketWorker.js'], ['lib', 'windowsTerminal.js']].map((rel) => sha(fs.readFileSync(path.join(dir, ...rel))));
+  const DONE = [pins.CONPTY_CC_BUILT_SHA256, pins.AGENT_JS_HANDOFF_SHA256, pins.UTILS_JS_BUILT_ONLY_SHA256, pins.WORKER_JS_QUIET_SHA256, pins.TERMINAL_JS_JOIN_SHA256];
   const run = (tool, dir, ...args) => spawnSync(process.execPath, [tool, '--root', dir, ...args], { encoding: 'utf8' });
 
   test('PINS: the installed node-pty is the patched one, and the patch is only its own lines', () => {
@@ -227,6 +234,31 @@ if (!WIN) {
     assert.equal(sha(pristineUtils), pins.UTILS_JS_PRISTINE_SHA256, 'utils.js without the loader lines is pristine 1.1.0, byte for byte');
     assert.equal(sha(builtWorker), pins.WORKER_JS_QUIET_SHA256, `lib/worker/conoutSocketWorker.js is not the pinned worker with the socket error listeners. ${HINT}`);
     assert.equal(sha(pristineWorker), pins.WORKER_JS_PRISTINE_SHA256, 'the worker without the pinned edits is pristine 1.1.0, byte for byte');
+    // PTY-NATURAL-EXIT-JOIN: the terminal reports a natural exit only once both the output close and
+    // the exit code have arrived; the agent's report runs the exit the close left for it.
+    assert.equal(sha(builtTerminal), pins.TERMINAL_JS_JOIN_SHA256, `lib/windowsTerminal.js is not the pinned natural-exit join form. ${HINT}`);
+    assert.equal(sha(pristineTerminal), pins.TERMINAL_JS_PRISTINE_SHA256, 'windowsTerminal.js without the join edits is pristine 1.1.0, byte for byte');
+    assert.equal(sha(preJoinJs), pins.AGENT_JS_PRE_JOIN_SHA256, 'windowsPtyAgent.js without the join edit is the form before the join, byte for byte');
+    for (const [text, edits] of [[handoffJs, pins.AGENT_JS_JOIN_EDITS], [builtTerminal, pins.TERMINAL_JS_EDITS]]) {
+      for (const [label, before, after] of edits) {
+        assert.equal(text.split(after).length, 2, `the join edit is in the file once: ${label}`);
+        assert.notEqual(before, after, label);
+      }
+    }
+    // The proof that the report is coming: ConPTY, no code yet, a positive root pid, and signal 0 says ESRCH.
+    const proof = builtTerminal.slice(builtTerminal.indexOf('function guppyExitReportComing(agent) {'), builtTerminal.indexOf('\n}\n', builtTerminal.indexOf('function guppyExitReportComing(agent) {')));
+    for (const s of ['agent._useConpty !== true', 'agent._exitCode !== undefined', 'Number.isInteger(pid) || pid <= 0', 'process.kill(pid, 0);', "return !!e && e.code === 'ESRCH';"]) assert.ok(proof.includes(s), `THE DEFERRAL NEEDS PROOF THAT THE REPORT IS COMING: ${s}`);
+    assert.doesNotMatch(proof, /setTimeout|setInterval|setImmediate|nextTick/, 'NO TIMER: the report is waited for, never polled');
+    assert.match(builtTerminal, /RESIDUALS[\s\S]*exit code 259[\s\S]*EPERM[\s\S]*winpty[\s\S]*napi_closing/, 'the comment names the residuals (259, EPERM, winpty, napi_closing)');
+    // The close: deferred, it calls neither emit nor _close(); otherwise it emits and closes as before.
+    const close = builtTerminal.slice(builtTerminal.indexOf("_this._socket.on('close', function () {"), builtTerminal.indexOf('            });\n', builtTerminal.indexOf("_this._socket.on('close', function () {")));
+    const deferred = close.slice(close.indexOf('if (guppyExitReportComing(guppyAgent)) {'), close.indexOf('                    return;\n'));
+    assert.match(deferred, /^if \(guppyExitReportComing\(guppyAgent\)\) \{\n {20}guppyAgent\._guppyPendingExit = function \(\) \{\n {24}_this\.emit\('exit', _this\._agent\.exitCode\);\n {24}_this\._close\(\);\n {20}\};\n$/, 'THE DEFERRED CLOSE ONLY LEAVES THE EXIT FOR THE REPORT: neither emit nor _close() at the close');
+    assert.match(close, /\n {16}\}\n {16}_this\.emit\('exit', _this\._agent\.exitCode\);\n {16}_this\._close\(\);\n$/, 'otherwise the close emits and closes, as before');
+    // The report: the code is set first, and the pending exit is cleared before it runs, as the last step.
+    const report = handoffJs.slice(handoffJs.indexOf('_$onProcessExit = function (exitCode, guppyCloseUnstarted) {'), handoffJs.indexOf('WindowsPtyAgent.prototype._flushDataAndCleanUp = function () {'));
+    assert.match(report, /^_\$onProcessExit = function \(exitCode, guppyCloseUnstarted\) \{\n {8}var _this = this;\n {8}this\._exitCode = exitCode;\n/, 'the code is set first');
+    assert.match(report, /\n {8}var guppyPendingExit = this\._guppyPendingExit;\n {8}this\._guppyPendingExit = undefined;\n {8}if \(typeof guppyPendingExit === 'function'\) \{\n {12}guppyPendingExit\(\);\n {8}\}\n {4}\};\n {4}$/, 'THE REPORT RUNS THE PENDING EXIT AS ITS LAST STEP, CLEARED BEFORE IT RUNS');
     assert.ok(pins.hasHandoffImports(CONPTY_NODE), `THE BINARY IS NOT BUILT FROM THE HANDOFF SOURCE: conpty.node does not import DuplicateHandle. ${HINT}`);
     assert.ok(pins.hasMutexImports(CONPTY_NODE), 'and it still carries #922');
     // PTY-CONHOST-LEAK-NATIVE: the binary, the loaded module and the source all carry the close.
@@ -271,11 +303,11 @@ if (!WIN) {
     const dir = tree(race922Cc, pristineJs);
     const check0 = run(TOOL, dir, '--check');
     assert.equal(check0.status, 1, '--check fails on an unpatched tree');
-    assert.deepEqual(shas(dir), [pins.CONPTY_CC_PATCHED_SHA256, pins.AGENT_JS_PRISTINE_SHA256, pins.UTILS_JS_PRISTINE_SHA256, pins.WORKER_JS_PRISTINE_SHA256], '--check changes nothing');
+    assert.deepEqual(shas(dir), [pins.CONPTY_CC_PATCHED_SHA256, pins.AGENT_JS_PRISTINE_SHA256, pins.UTILS_JS_PRISTINE_SHA256, pins.WORKER_JS_PRISTINE_SHA256, pins.TERMINAL_JS_PRISTINE_SHA256], '--check changes nothing');
     const first = run(TOOL, dir);
     assert.equal(first.status, 0, first.stderr);
-    assert.match(first.stdout, /applied the root-handle handoff to node-pty 1\.1\.0 \(4 file\(s\)\)/);
-    assert.deepEqual(shas(dir), DONE, 'all four files are the pinned forms');
+    assert.match(first.stdout, /applied the root-handle handoff to node-pty 1\.1\.0 \(5 file\(s\)\)/);
+    assert.deepEqual(shas(dir), DONE, 'all five files are the pinned forms');
     const again = run(TOOL, dir);
     assert.equal(again.status, 0, again.stderr);
     assert.match(again.stdout, /already applied/);
@@ -291,32 +323,38 @@ if (!WIN) {
     assert.equal(run(TOOL, half).status, 0);
     assert.deepEqual(shas(half), DONE);
     // A tree from before NODEPTY-PACKAGED-PROOF (the handoff applied, the loader not) is finished too.
-    const older = tree(builtCc, handoffJs);
+    const older = tree(builtCc, preJoinJs);
     const olderRun = run(TOOL, older);
-    assert.match(olderRun.stdout, /\(2 file\(s\)\)/, olderRun.stderr);
+    assert.match(olderRun.stdout, /\(4 file\(s\)\)/, olderRun.stderr);
     assert.deepEqual(shas(older), DONE);
     // A tree from before PTY-CONHOST-LEAK-NATIVE (everything applied but the close on exit): only
     // conpty.cc changes, and the #922 tool leaves the handoff form alone on the way.
-    const beforeClose = tree(handoffCc, handoffJs, { utils: builtUtils, worker: builtWorker });
+    const beforeClose = tree(handoffCc, preJoinJs, { utils: builtUtils, worker: builtWorker });
     assert.equal(run(RACE_TOOL, beforeClose).status, 0, 'THE #922 TOOL MUST ACCEPT THE HANDOFF FORM (an upgrade of an installed tree)');
     assert.equal(shas(beforeClose)[0], pins.CONPTY_CC_HANDOFF_SHA256);
     const beforeCloseRun = run(TOOL, beforeClose);
-    assert.match(beforeCloseRun.stdout, /\(1 file\(s\)\)/, beforeCloseRun.stderr);
+    assert.match(beforeCloseRun.stdout, /\(3 file\(s\)\)/, beforeCloseRun.stderr);
     assert.deepEqual(shas(beforeClose), DONE, 'A TREE WITH THE HANDOFF BUT NOT THE CLOSE IS UPGRADED TO THE BUILT FORM');
     // And a tree from before PTY-EARLY-KILL-EPIPE-108 (only the output worker is still pristine).
-    const before108 = tree(builtCc, handoffJs, { utils: builtUtils });
+    const before108 = tree(builtCc, preJoinJs, { utils: builtUtils });
     const before108Run = run(TOOL, before108);
-    assert.match(before108Run.stdout, /\(1 file\(s\)\)/, before108Run.stderr);
+    assert.match(before108Run.stdout, /\(3 file\(s\)\)/, before108Run.stderr);
     assert.deepEqual(shas(before108), DONE);
+    // And a tree from before PTY-NATURAL-EXIT-JOIN: the agent takes its last edit, the terminal both.
+    const beforeJoin = tree(builtCc, preJoinJs, { utils: builtUtils, worker: builtWorker });
+    const beforeJoinRun = run(TOOL, beforeJoin);
+    assert.match(beforeJoinRun.stdout, /\(2 file\(s\)\)/, beforeJoinRun.stderr);
+    assert.deepEqual(shas(beforeJoin), DONE, 'A TREE FROM BEFORE THE JOIN IS UPGRADED');
   });
 
   test('TOOL: --check fails when any one file alone is unpatched, and names it (Jim T4)', () => {
     const cases = [
-      ['only lib/windowsPtyAgent.js unpatched', tree(builtCc, pristineJs, { utils: builtUtils, worker: builtWorker }), /windowsPtyAgent\.js is not the pinned root-handle form/],
-      ['only src/win/conpty.cc unpatched', tree(race922Cc, handoffJs, { utils: builtUtils, worker: builtWorker }), /conpty\.cc is not the pinned root-handle form/],
-      ['only the close on exit missing from src/win/conpty.cc (A MISSED POSTINSTALL: the console hosts leak again)', tree(handoffCc, handoffJs, { utils: builtUtils, worker: builtWorker }), /conpty\.cc is not the pinned root-handle form/],
-      ['only lib/utils.js unpatched (the prebuilt fallback is back)', tree(builtCc, handoffJs, { worker: builtWorker }), /utils\.js is not the pinned root-handle form/],
-      ['only lib/worker/conoutSocketWorker.js unpatched (A MISSED POSTINSTALL: the EPIPE is back)', tree(builtCc, handoffJs, { utils: builtUtils }), /conoutSocketWorker\.js is not the pinned root-handle form/]
+      ['only lib/windowsPtyAgent.js unpatched', tree(builtCc, pristineJs, { utils: builtUtils, worker: builtWorker, terminal: builtTerminal }), /windowsPtyAgent\.js is not the pinned root-handle form/],
+      ['only src/win/conpty.cc unpatched', tree(race922Cc, handoffJs, { utils: builtUtils, worker: builtWorker, terminal: builtTerminal }), /conpty\.cc is not the pinned root-handle form/],
+      ['only the close on exit missing from src/win/conpty.cc (A MISSED POSTINSTALL: the console hosts leak again)', tree(handoffCc, handoffJs, { utils: builtUtils, worker: builtWorker, terminal: builtTerminal }), /conpty\.cc is not the pinned root-handle form/],
+      ['only lib/utils.js unpatched (the prebuilt fallback is back)', tree(builtCc, handoffJs, { worker: builtWorker, terminal: builtTerminal }), /utils\.js is not the pinned root-handle form/],
+      ['only lib/worker/conoutSocketWorker.js unpatched (A MISSED POSTINSTALL: the EPIPE is back)', tree(builtCc, handoffJs, { utils: builtUtils, terminal: builtTerminal }), /conoutSocketWorker\.js is not the pinned root-handle form/],
+      ['only lib/windowsTerminal.js unpatched (A MISSED POSTINSTALL: a natural exit loses its code)', tree(builtCc, handoffJs, { utils: builtUtils, worker: builtWorker }), /windowsTerminal\.js is not the pinned root-handle form/]
     ];
     for (const [name, dir, why] of cases) {
       const before = shas(dir);
@@ -336,6 +374,7 @@ if (!WIN) {
       ['windowsPtyAgent.js changed', tree(race922Cc, pristineJs.replace('_innerPid', '_innerPidX')), [], /windowsPtyAgent\.js is neither pristine 1\.1\.0/],
       ['utils.js changed', tree(race922Cc, pristineJs, { utils: pristineUtils.replace('Check build, debug', 'Check  build, debug') }), [], /utils\.js is neither pristine 1\.1\.0/],
       ['the output worker changed', tree(race922Cc, pristineJs, { worker: pristineWorker.replace('workerSocket', 'workerSocketX') }), [], /conoutSocketWorker\.js is neither pristine 1\.1\.0/],
+      ['windowsTerminal.js changed', tree(race922Cc, pristineJs, { terminal: pristineTerminal.replace('DEFAULT_NAME', 'DEFAULT_NAMEX') }), [], /windowsTerminal\.js is neither pristine 1\.1\.0/],
       ['another node-pty', tree(race922Cc, pristineJs, { version: '1.2.0' }), [], /node-pty 1\.1\.0 required, got 1\.2\.0/],
       ['an unknown argument', tree(race922Cc, pristineJs), ['--help'], /unknown argument "--help"/],
       ['--root without a value', tree(race922Cc, pristineJs), ['--root'], /unknown argument "--root"/]
@@ -361,6 +400,7 @@ if (!WIN) {
     assert.match(record, /CONPTY_CC_BUILT_SHA256/, 'the record refuses a source without the handoff');
     assert.match(record, /hasHandoffImports/, 'and a binary without it');
     assert.match(record, /if \(!binaries\.every\(pins\.hasCloseMarker\)\) fail\(/, 'and a binary that does not close an ended terminal (PTY-CONHOST-LEAK-NATIVE)');
+    assert.match(record, /if \(terminalSha256 !== pins\.TERMINAL_JS_JOIN_SHA256\) fail\(/, 'and a windowsTerminal.js without the natural-exit join (PTY-NATURAL-EXIT-JOIN)');
   });
 
   /** The binary with every copy of the close-on-exit name spoiled: it parses, and does not say it closes. */
@@ -380,7 +420,7 @@ if (!WIN) {
     const without = Buffer.from(bin);
     without[at] = 'X'.charCodeAt(0);   // a binary that imports "XuplicateHandle": parses, lacks the call
     const withoutClose = noCloseMarker(bin);
-    const fake = ({ binary = bin, record = sha(binary), js = handoffJs, utils = builtUtils, worker = builtWorker, marker = true }) => {
+    const fake = ({ binary = bin, record = sha(binary), js = handoffJs, utils = builtUtils, worker = builtWorker, terminal = builtTerminal, marker = true }) => {
       const dir = tempDir('phnh-markers-');
       const np = path.join(dir, 'node-pty');
       fs.mkdirSync(path.join(np, 'build', 'Release'), { recursive: true });
@@ -391,22 +431,24 @@ if (!WIN) {
       fs.writeFileSync(path.join(np, 'lib', 'utils.js'), utils);
       fs.mkdirSync(path.join(np, 'lib', 'worker'), { recursive: true });
       fs.writeFileSync(path.join(np, 'lib', 'worker', 'conoutSocketWorker.js'), worker);
+      fs.writeFileSync(path.join(np, 'lib', 'windowsTerminal.js'), terminal);
       if (marker) fs.writeFileSync(path.join(np, pins.MARKER_FILE), JSON.stringify({ version: pins.NODE_PTY_VERSION, sourceSha256: pins.CONPTY_CC_BUILT_SHA256, files: { 'build/Release/conpty.node': { sha256: record } } }));
       const out = spawnSync(process.execPath, [MARKERS, dir, path.join(dir, 'models')], { encoding: 'utf8' }).stdout.split(/\r?\n/);
       const of = (label) => (out.find((l) => l.endsWith(label)) || '').slice(0, 5).trim();
       return [of('conpty.node built with the root-handle handoff'), of('windowsPtyAgent.js keeps the root handle'), of('node-pty loader takes built binaries only'), of('node-pty output worker handles socket errors'),
-        of('conpty.node closes the pseudoconsole of an ended terminal')];
+        of('conpty.node closes the pseudoconsole of an ended terminal'), of('windowsTerminal.js reports a natural exit with its code')];
     };
     assert.equal(pins.hasHandoffImports(CONPTY_NODE), true);
-    assert.deepEqual(fake({}), ['OK', 'OK', 'OK', 'OK', 'OK'], 'the installed build passes all five');
-    assert.deepEqual(fake({ binary: without }), ['FAIL', 'OK', 'OK', 'OK', 'OK'], 'A BINARY WITHOUT DuplicateHandle FAILS, even with a matching record');
-    assert.deepEqual(fake({ binary: withoutClose }), ['OK', 'OK', 'OK', 'OK', 'FAIL'], 'A BINARY THAT DOES NOT CLOSE AN ENDED TERMINAL FAILS, even with a matching record (marker 18)');
-    assert.deepEqual(fake({ record: '0'.repeat(64) }), ['FAIL', 'OK', 'OK', 'OK', 'FAIL'], 'a binary that is not the recorded one fails');
-    assert.deepEqual(fake({ marker: false }), ['FAIL', 'OK', 'OK', 'OK', 'FAIL'], 'no record fails');
-    assert.deepEqual(fake({ js: pristineJs }), ['OK', 'FAIL', 'OK', 'OK', 'OK'], 'A windowsPtyAgent.js THAT DROPS THE HANDLE FAILS');
-    assert.deepEqual(fake({ utils: pristineUtils }), ['OK', 'OK', 'FAIL', 'OK', 'OK'], 'A LOADER THAT FALLS BACK TO THE PREBUILT BINARY FAILS');
-    assert.deepEqual(fake({ worker: pristineWorker }), ['OK', 'OK', 'OK', 'FAIL', 'OK'], 'AN OUTPUT WORKER WITHOUT THE ERROR LISTENERS FAILS (marker 17)');
-    assert.match(fs.readFileSync(MARKERS, 'utf8'), /Prints ALL 18 MARKERS OK/);
+    assert.deepEqual(fake({}), ['OK', 'OK', 'OK', 'OK', 'OK', 'OK'], 'the installed build passes all six');
+    assert.deepEqual(fake({ binary: without }), ['FAIL', 'OK', 'OK', 'OK', 'OK', 'OK'], 'A BINARY WITHOUT DuplicateHandle FAILS, even with a matching record');
+    assert.deepEqual(fake({ binary: withoutClose }), ['OK', 'OK', 'OK', 'OK', 'FAIL', 'OK'], 'A BINARY THAT DOES NOT CLOSE AN ENDED TERMINAL FAILS, even with a matching record (marker 18)');
+    assert.deepEqual(fake({ record: '0'.repeat(64) }), ['FAIL', 'OK', 'OK', 'OK', 'FAIL', 'OK'], 'a binary that is not the recorded one fails');
+    assert.deepEqual(fake({ marker: false }), ['FAIL', 'OK', 'OK', 'OK', 'FAIL', 'OK'], 'no record fails');
+    assert.deepEqual(fake({ js: pristineJs }), ['OK', 'FAIL', 'OK', 'OK', 'OK', 'OK'], 'A windowsPtyAgent.js THAT DROPS THE HANDLE FAILS');
+    assert.deepEqual(fake({ utils: pristineUtils }), ['OK', 'OK', 'FAIL', 'OK', 'OK', 'OK'], 'A LOADER THAT FALLS BACK TO THE PREBUILT BINARY FAILS');
+    assert.deepEqual(fake({ worker: pristineWorker }), ['OK', 'OK', 'OK', 'FAIL', 'OK', 'OK'], 'AN OUTPUT WORKER WITHOUT THE ERROR LISTENERS FAILS (marker 17)');
+    assert.deepEqual(fake({ terminal: pristineTerminal }), ['OK', 'OK', 'OK', 'OK', 'OK', 'FAIL'], 'A windowsTerminal.js WITHOUT THE JOIN FAILS (marker 19)');
+    assert.match(fs.readFileSync(MARKERS, 'utf8'), /Prints ALL 19 MARKERS OK/);
   });
 
   // ---- NODEPTY-PACKAGED-PROOF: the packaged check, and the loader ---------------------------
@@ -437,7 +479,7 @@ if (!WIN) {
     return Buffer.concat([head, json]);
   };
   /** extra: files on disk AND listed unpacked; diskOnly: on disk, not listed; asar(list): the list, a Buffer, or null for none. */
-  const packaged = ({ version = pins.NODE_PTY_VERSION, js = handoffJs, utils = builtUtils, worker = builtWorker, binary = conptyBin, record = sha(binary), marker = true, cc = null, oc = ocPair, extra = [], diskOnly = [], asar = (l) => l } = {}) => {
+  const packaged = ({ version = pins.NODE_PTY_VERSION, js = handoffJs, utils = builtUtils, worker = builtWorker, terminal = builtTerminal, binary = conptyBin, record = sha(binary), marker = true, cc = null, oc = ocPair, extra = [], diskOnly = [], asar = (l) => l } = {}) => {
     const dir = tempDir('phnh-pkg-');
     const resources = path.join(dir, 'resources');
     const listed = [
@@ -445,6 +487,7 @@ if (!WIN) {
       [`${NPP}/lib/windowsPtyAgent.js`, js],
       [`${NPP}/lib/utils.js`, utils],
       [`${NPP}/lib/worker/conoutSocketWorker.js`, worker],
+      [`${NPP}/lib/windowsTerminal.js`, terminal],
       [`${NPP}/build/Release/conpty.node`, binary],
       ...(marker ? [[`${NPP}/${pins.MARKER_FILE}`, JSON.stringify({ version: pins.NODE_PTY_VERSION, sourceSha256: pins.CONPTY_CC_BUILT_SHA256, files: { 'build/Release/conpty.node': { sha256: record } } })]] : []),
       ...(cc === null ? [] : [[`${NPP}/src/win/conpty.cc`, cc]]),
@@ -467,7 +510,7 @@ if (!WIN) {
   const P = {
     good(mod) {
       const dir = packaged();
-      assert.deepEqual(mod.inspect(dir).checks.map((c) => c.ok), Array(11).fill(true), `a patched packaged app passes all 11: ${JSON.stringify(mod.inspect(dir).checks.filter((c) => !c.ok))}`);
+      assert.deepEqual(mod.inspect(dir).checks.map((c) => c.ok), Array(12).fill(true), `a patched packaged app passes all 12: ${JSON.stringify(mod.inspect(dir).checks.filter((c) => !c.ok))}`);
       assert.deepEqual(failing(mod, path.join(dir, 'resources')), [], 'the resources folder may be named instead');
       assert.deepEqual(failing(mod, packaged({ cc: builtCc })), [], 'the patched source may ship');
       assert.deepEqual(failing(mod, packaged({ extra: [[`${NPP}/prebuilds/darwin-arm64/pty.node`, stray]] })), [], 'a prebuilt binary of another platform is not the Windows fallback');
@@ -489,6 +532,13 @@ if (!WIN) {
       const noWorker = packaged({ asar: (l) => l.filter(([p]) => p !== `${NPP}/lib/worker/conoutSocketWorker.js`) });
       assert.deepEqual(failing(mod, noWorker), [7], 'an archive that does not list the worker fails');
       assert.match(whyOf(mod, noWorker, 7), /does not list node_modules\/node-pty\/lib\/worker\/conoutSocketWorker\.js/);
+      // PTY-NATURAL-EXIT-JOIN: the terminal that waits for the exit code.
+      const terminal = packaged({ terminal: pristineTerminal });
+      assert.deepEqual(failing(mod, terminal), [11], 'AN UNPATCHED windowsTerminal.js FAILS THE PACKAGED CHECK');
+      assert.match(whyOf(mod, terminal, 11), /UNPATCHED 1\.1\.0 file: a natural exit can be reported with an undefined code/);
+      const noTerminal = packaged({ asar: (l) => l.filter(([p]) => p !== `${NPP}/lib/windowsTerminal.js`) });
+      assert.deepEqual(failing(mod, noTerminal), [7], 'AN ARCHIVE THAT DOES NOT LIST windowsTerminal.js FAILS');
+      assert.match(whyOf(mod, noTerminal, 7), /does not list node_modules\/node-pty\/lib\/windowsTerminal\.js/);
       // PTY-CONHOST-ORPHAN (option A): every PTY starts on the bundled OpenConsole; without the pair none starts.
       const noHost = packaged({ oc: { ...ocPair, 'OpenConsole.exe': null } });
       assert.deepEqual(failing(mod, noHost), [7, 10], 'A PACKAGED APP WITHOUT OpenConsole.exe FAILS (on disk, and in the archive)');
@@ -698,7 +748,9 @@ if (!WIN) {
     { name: 'P13 the close-on-exit name is not looked for', edits: [['binarySha !== null && pins.hasCloseMarker(binary),', 'binarySha !== null,']], run: P.binary, dies: /A BINARY WITHOUT THE CLOSE ON EXIT FAILS THE PACKAGED CHECK/ },
     { name: 'P14 any OpenConsole passes', edits: [['ships in build/Release/conpty`, !!ocArch,', 'ships in build/Release/conpty`, true,']], run: P.files, dies: /A PACKAGED APP WITHOUT OpenConsole\.exe FAILS/ },
     { name: 'P15 only OpenConsole.exe is compared', edits: [['oc.every(([n, s]) => s === pins.OPENCONSOLE_SHA256[a][n])', "oc.every(([n, s]) => n !== 'OpenConsole.exe' || s === pins.OPENCONSOLE_SHA256[a][n])"]], run: P.files, dies: /A conpty\.dll THAT IS NOT THE PINNED BUILD FAILS/ },
-    { name: 'P16 the archive need not list the pair', edits: [['BUILT, ...OPENCONSOLE].filter', 'BUILT].filter']], run: P.files, dies: /A PACKAGED APP WITHOUT OpenConsole\.exe FAILS \(on disk, and in the archive\)/ }
+    { name: 'P16 the archive need not list the pair', edits: [['BUILT, ...OPENCONSOLE].filter', 'BUILT].filter']], run: P.files, dies: /A PACKAGED APP WITHOUT OpenConsole\.exe FAILS \(on disk, and in the archive\)/ },
+    { name: 'P17 any windowsTerminal.js passes', edits: [['termSha === pins.TERMINAL_JS_JOIN_SHA256,', 'true,']], run: P.files, dies: /AN UNPATCHED windowsTerminal\.js FAILS THE PACKAGED CHECK/ },
+    { name: 'P18 the archive need not list windowsTerminal.js', edits: [["'lib/worker/conoutSocketWorker.js', 'lib/windowsTerminal.js', BUILT,", "'lib/worker/conoutSocketWorker.js', BUILT,"]], run: P.files, dies: /AN ARCHIVE THAT DOES NOT LIST windowsTerminal\.js FAILS/ }
   ];
   test('MUTANT CENSUS (packaged check, loader): every mutant applies once and dies at the assertion that names its guarantee', async (t) => {
     const source = fs.readFileSync(CHECKER, 'utf8');

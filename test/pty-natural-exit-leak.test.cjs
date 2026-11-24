@@ -11,6 +11,20 @@ require('./tools/own-job.cjs');
 // Everything here goes through a real PtyManager and a real console child, and waits BY EVENT: each
 // worker's 'exit' and each input socket's 'close'. The watchdog is only the bound on "never" and
 // names what is still held. Every test frees what it made, so a red run still lets the file end.
+//
+// PTY-NATURAL-EXIT-JOIN (FLAKE-PTY-NATURAL-EXIT-READY-EXITCODE-UNDEFINED-108). node-pty emitted 'exit'
+// at the output socket's close and read the code then; on ConPTY only the native exit report sets it,
+// and the host can close the pipe before that queued report has run: 'exit' carried undefined. The
+// patch (tools/patch-node-pty-root-handle.cjs) leaves the exit to the report when the root has ended.
+// The two JOIN cells below hold each order by its own lever, with no timer. Mutants, each applied by
+// hand to node_modules/node-pty/lib, this file run alone, then the file restored and its sha checked:
+//   M1 windowsPtyAgent.js `            guppyPendingExit();` -> `            void 0;` (the report never
+//      emits the exit it was left): dies at RED BEFORE, 'THE EXIT IS REPORTED ONCE THE REPORT HAS RUN'.
+//   M2 windowsTerminal.js back to pristine 1.1.0 (THE REVERT): dies at RED BEFORE, 'NO EXIT AT THE CLOSE'.
+//   M3 windowsTerminal.js `        process.kill(pid, 0);` -> `        throw Object.assign(new Error('m3'),
+//      { code: 'ESRCH' });` (no liveness proof): dies at GUARD, 'THE CLOSE OF A LIVE ROOT IS REPORTED AT ONCE'.
+//   M4 windowsTerminal.js `return !!e && e.code === 'ESRCH';` -> `return !(e && e.code === 'ESRCH');`
+//      (the proof inverted): dies at RED BEFORE, 'NO EXIT AT THE CLOSE'.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const loadTs = require('./load-ts.cjs');
@@ -46,6 +60,14 @@ async function allReleased(terminals, after) {
       + terminals.map((t, i) => `terminal ${i + 1}: conout worker ${t.workerState}, input socket ${t.inState}`).join('; '))), NEVER_MS);
   })]).finally(() => clearTimeout(watchdog));
 }
+
+/** The bound on "never" for one awaited event; names it. */
+async function within(promise, what) {
+  let watchdog;
+  return Promise.race([promise, new Promise((_, rej) => { watchdog = setTimeout(() => rej(new Error(`${what}: not within ${NEVER_MS} ms`)), NEVER_MS); })]).finally(() => clearTimeout(watchdog));
+}
+
+const printed = (proc, text) => new Promise((res) => { let seen = ''; proc.onData((d) => { seen += d; if (seen.includes(text)) res(); }); });
 
 async function freeAll(terminals) {
   for (const t of terminals) { await t.worker.terminate(); t.inSocket.destroy(); }
@@ -85,7 +107,10 @@ for (const [name, script, code] of NATURAL) {
         assert.deepEqual(seen.get(x.id), { inDestroyed: false, disposed: false }, 'the exit is reported before the terminal is released');
       }
       await allReleased(terminals, 'after a natural exit (PtyManager onExit frees nothing)');
-      assert.deepEqual(kills, [], 'a terminal that ended by itself is released without a kill and without naming a pid');
+      // PTY-NATURAL-EXIT-JOIN: the output close may ask whether the terminal's own root has ended
+      // (signal 0 sends nothing). No other pid, and no real signal.
+      const probes = new Set(terminals.map((x) => `process.kill(${x.proc._agent._innerPid}, 0)`));
+      assert.deepEqual(kills.filter((k) => !probes.has(k)), [], 'a terminal that ended by itself is released without a kill and without naming a pid');
       // A kill after the natural exit is a harmless no-op, and so is a write.
       for (const x of terminals) {
         assert.deepEqual(m.kill(x.id), { ok: false, error: `no pty: ${x.id}` });
@@ -115,6 +140,72 @@ test('PTY-NATURAL-EXIT: a killed terminal is released too: its conout worker and
     for (const x of terminals) await x.exited;
     await allReleased(terminals, 'after PtyManager.kill and the exit that follows it');
     for (const x of terminals) assert.deepEqual(m.kill(x.id), { ok: false, error: `no pty: ${x.id}` }, 'a second kill is a no-op');
+  } finally {
+    await freeAll(terminals);
+  }
+});
+
+test('PTY-NATURAL-EXIT-JOIN: RED BEFORE: the output closes before the exit report has run; the exit waits for the report and carries its code', { skip: !WIN }, async () => {
+  const { PtyManager } = loadTs('src/main/pty.ts');
+  const node = consoleNode();
+  const m = new PtyManager();
+  const terminals = [];
+  try {
+    // The child ends by itself on a line of input, so the levers are in place before it can end.
+    const x = await open(m, node, "process.stdin.once('data', () => process.exit(0)); console.log('READY-JOIN')");
+    terminals.push(x);
+    const agent = x.proc._agent;
+    const order = [];
+    const codes = [];
+    x.proc.onExit((e) => { order.push('exit'); codes.push(e.exitCode); });
+    // The lever: the native exit report is held, so the host's pipe close comes first, every time.
+    let held = null;
+    let onHeld;
+    const heldReport = new Promise((res) => { onHeld = res; });
+    const report = agent._$onProcessExit;
+    agent._$onProcessExit = function (...a) { held = () => { order.push('report'); return report.apply(this, a); }; onHeld(); };
+    // Added after node-pty's own close listener (added on ready_datapipe), so it runs after it.
+    const closed = new Promise((res) => agent._outSocket.once('close', res));
+    await within(printed(x.proc, 'READY-JOIN'), 'the child printed');
+    assert.equal(m.write(x.id, '\r', 'HUMAN').ok, true, 'the line that ends the child');
+    await within(Promise.all([heldReport, closed]), 'the exit report and the output close after a natural exit');
+    assert.deepEqual(order, [], 'NO EXIT AT THE CLOSE WHILE THE REPORT IS STILL TO RUN: it would carry an undefined code');
+    held();
+    assert.deepEqual(order, ['report', 'exit'], 'THE EXIT IS REPORTED ONCE THE REPORT HAS RUN, in its turn');
+    assert.deepEqual(codes, [0], "and it carries the child's own exit code");
+    assert.equal(agent._guppyPendingExit, undefined, 'the pending exit is cleared');
+  } finally {
+    await freeAll(terminals);
+  }
+});
+
+test('PTY-NATURAL-EXIT-JOIN: GUARD: an output close while the root still runs is reported at once, as before', { skip: !WIN }, async () => {
+  const { PtyManager } = loadTs('src/main/pty.ts');
+  const node = consoleNode();
+  const m = new PtyManager();
+  const terminals = [];
+  try {
+    const x = await open(m, node, "console.log('READY-GUARD'); setInterval(() => {}, 1000)");
+    terminals.push(x);
+    const agent = x.proc._agent;
+    const exits = [];
+    x.proc.onExit((e) => exits.push(e.exitCode));
+    let reported = false;
+    let onReport;
+    const reportRan = new Promise((res) => { onReport = res; });
+    const report = agent._$onProcessExit;
+    agent._$onProcessExit = function (...a) { reported = true; try { return report.apply(this, a); } finally { onReport(); } };
+    await within(printed(x.proc, 'READY-GUARD'), 'the child printed');
+    const closed = new Promise((res) => agent._outSocket.once('close', res));
+    agent._outSocket.destroy();   // the lever: the output closes with the root running
+    await within(closed, 'the output close');
+    assert.deepEqual(exits, [undefined], 'THE CLOSE OF A LIVE ROOT IS REPORTED AT ONCE: nothing proves that a report is coming');
+    assert.equal(reported, false, 'no report has run');
+    assert.equal(agent._guppyPendingExit, undefined, 'nothing is left for a report');
+    assert.doesNotThrow(() => process.kill(agent._innerPid, 0), 'the root still runs');
+    process.kill(agent._innerPid);   // this test's own child
+    await within(reportRan, 'the exit report after the end of the child');
+    assert.deepEqual(exits, [undefined], 'the report emits no second exit');
   } finally {
     await freeAll(terminals);
   }
