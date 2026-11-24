@@ -37,7 +37,8 @@ test.after(() => {
   fs.rmSync(PRIVATE_ROOT, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 const electronParent = () => ({ ...process.env, [KEY]: consoleNode().file });
-const sameId = (a, b) => { const x = fs.statSync(a), y = fs.statSync(b); return x.ino === y.ino && x.dev === y.dev && x.size === y.size; };
+// bigint stats: a Windows file id is 64-bit and as a JS number two different files can compare equal
+const sameId = (a, b) => { const x = fs.statSync(a, { bigint: true }), y = fs.statSync(b, { bigint: true }); return x.ino === y.ino && x.dev === y.dev && x.size === y.size; };
 // binding control: a cell that linked the shared console node again fails here by name, not by EPERM later
 const notShared = (file) => assert.ok(!sameId(file, SHARED_NODE), `${file} is a link of the shared console node ${SHARED_NODE}, not this file's private copy`);
 

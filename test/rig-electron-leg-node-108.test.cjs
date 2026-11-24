@@ -65,7 +65,8 @@ function setup(t) {
   return { root, shared, electron, sandbox, electronRig };
 }
 
-const sameId = (a, b) => { const x = fs.statSync(a), y = fs.statSync(b); return x.ino === y.ino && x.dev === y.dev && x.size === y.size; };
+// bigint stats: a Windows file id is 64-bit and as a JS number two different files can compare equal
+const sameId = (a, b) => { const x = fs.statSync(a, { bigint: true }), y = fs.statSync(b, { bigint: true }); return x.ino === y.ino && x.dev === y.dev && x.size === y.size; };
 // binding control: a cell that linked the shared console node again fails here by name, not by EPERM later
 const notShared = (file) => assert.ok(!sameId(file, SHARED_NODE), `${file} is a link of the shared console node ${SHARED_NODE}, not this file's private copy`);
 
@@ -119,6 +120,46 @@ test('RIG-ELECTRON-LEG-NOT-ISOLATED-108: (N1) a node-leg rig does not run a same
   assert.ok(sameId(path.join(env.RIG_NODE_DIR, 'node.exe'), nodeExe), 'the node leg runs its own execPath');
   assert.equal(fs.readFileSync(path.join(plain, 'node.exe'), 'utf8'), 'seeded by an Electron-leg rig');
   assert.equal(isolation.checkIsolation(env, s, { who: 'node leg, keyed dir' }), true);
+});
+
+test('RIG-ISOLATION-SAMEFILE-INO-53BIT-COLLISION-108: (N1) with file ids one apart above 2^53: two different files that are equal as JS numbers are not the same file', (t) => {
+  const { root, shared, sandbox } = setup(t);
+  const binN = path.join(root, 'bin-node');
+  fs.mkdirSync(binN);
+  const nodeExe = path.join(binN, 'node.exe');
+  fs.writeFileSync(nodeExe, 'stand-in node.exe (the node leg)');
+  const plain = path.join(shared, `md-rig-node-${process.version}-node`);
+  fs.mkdirSync(plain, { recursive: true });
+  const seeded = path.join(plain, 'node.exe');
+  fs.writeFileSync(seeded, 'seeded by an Electron-leg rig');
+  // Two neighbouring file records with a high sequence number, as a churned temp volume hands out.
+  const ID_A = (1000n << 48n) | 5n;
+  const ID_B = ID_A + 1n;
+  assert.notEqual(ID_A, ID_B);
+  assert.equal(Number(ID_A), Number(ID_B), 'teeth: these two ids are one number once they are JS numbers');
+  // fs.statSync as Windows answers it, for these two files (and any hard link of them) only: the id above
+  // in bigint mode, the same id rounded to a JS number otherwise. Everything else is the real stat.
+  const realStat = fs.statSync;
+  const realId = (p) => realStat.call(fs, p, { bigint: true }).ino;
+  const ids = new Map([[realId(nodeExe), ID_A], [realId(seeded), ID_B]]);
+  const asked = new Set();
+  const restore = () => { fs.statSync = realStat; };
+  t.after(restore);
+  fs.statSync = function statWithHighIds(p, opts) {
+    const st = realStat.call(fs, p, opts);
+    if (!st) return st;
+    const id = ids.get(opts && opts.bigint ? st.ino : realId(p));
+    if (id !== undefined) { asked.add(id); st.ino = opts && opts.bigint ? id : Number(id); }
+    return st;
+  };
+  const s = sandbox();
+  let env;
+  try { env = withExec(nodeExe, shared, () => isolation.rigEnv(s, process.env, { versions: { node: process.versions.node } })); } finally { restore(); }
+  assert.deepEqual([...asked].sort(), [ID_A, ID_B], 'teeth: the rig compared the seeded node with its own node');
+  assert.ok(path.basename(env.RIG_NODE_DIR).startsWith(`${path.basename(plain)}-`), env.RIG_NODE_DIR);
+  assert.ok(sameId(path.join(env.RIG_NODE_DIR, 'node.exe'), nodeExe), 'the node leg runs its own execPath');
+  assert.equal(fs.readFileSync(seeded, 'utf8'), 'seeded by an Electron-leg rig');
+  assert.equal(isolation.checkIsolation(env, s, { who: 'node leg, keyed dir, high file ids' }), true);
 });
 
 test('RIG-ELECTRON-LEG-NOT-ISOLATED-108: teeth: electron.exe is never the rig node; no console node throws by name', (t) => {
