@@ -294,10 +294,13 @@ test('F6 INTERFERED, then ALREADY_HANDLED / SEND_AGAIN: the ledger follows the t
 // the stub had echoed anything: under load it read the composer of before the keys (empty) and
 // RELEASED. The second cell holds the stub's stdin (scenario.echoHold) so that case is certain: its
 // control states that god's keys are not on the screen after the quiet time, then the hold ends.
-// NOT covered here: a look taken BEFORE the echo still RELEASES. That is the product's case, card
-// HELD-WAKE-ECHO-LAG-RELEASE. The wait before the last look guards load only (no cell holds it).
+// G1b (HELD-WAKE-ECHO-LAG-RELEASE): the third cell takes a look BEFORE the echo, while the stub
+// still holds its stdin. The composer it reads is the clean one of before god's keys; on the base
+// that look RELEASED and the wake was staged again over god's draft. The owner now keeps the hold
+// while the PTY has printed nothing since the last typed input ('input-not-echoed').
+// The wait before the last look guards load only (no cell holds it).
 const ECHO_RELEASE_MS = 800;   // the hold ends this long after the cue: a look not waiting for the echo runs first
-const g1 = (scenario, { echoHeld = false } = {}) => async (t) => {
+const g1 = (scenario, { echoHeld = false, earlyLook = false } = {}) => async (t) => {
   const rig = await startRig(t);
   await rig.setup([{ id: 'cl-a', flavour: 'claude', scenario }]);
   await rig.call('armInterfere', { id: 'cl-a', by: 'GOD' });
@@ -313,6 +316,12 @@ const g1 = (scenario, { echoHeld = false } = {}) => async (t) => {
     const pt = await rig.call('ptyTrace', { id: 'cl-a' });
     const inputs = rig.transcript('cl-a').filter((r) => r.kind === 'pty-input');
     assert.deepEqual([pt.echoSeen, inputs.length], [0, 0], "control: the hold kept god's keys off the screen past the quiet time (no echo at the host, no input read by the stub)");
+    if (earlyLook) {
+      const before = await rig.call('recheckHeld', { id: 'cl-a' });
+      const stamps = await rig.call('ptyTrace', { id: 'cl-a' });
+      assert.deepEqual([before.kind, before.why], ['HELD', 'input-not-echoed'], `G1b: a look before god's keys printed anything keeps the hold (got ${JSON.stringify(before)}; trace ${JSON.stringify(stamps)})`);
+      assert.ok(await rig.call('inhibition', { id: 'cl-a' }), 'G1b: the PTY is still held');
+    }
     rig.cue('cl-a', { cue: 'echo-release', afterMs: ECHO_RELEASE_MS });
   }
   await rig.screenCovers('cl-a', (d) => d.includes(' and god'), "god's typed text");
@@ -351,6 +360,7 @@ const g1 = (scenario, { echoHeld = false } = {}) => async (t) => {
 };
 test('G1 god unsticks a held wake through term: INTERFERED by god, god clears and sends, the mail is acted once, the held look releases', T, g1({}));
 test("G1 echo held: the stub reads none of the keys until after the quiet time; the held look still waits for god's draft on the screen", T, g1({ echoHold: true }, { echoHeld: true }));
+test("G1b echo held, early look: a look taken before god's keys printed anything keeps the hold; after the echo god's draft is still never erased", T, g1({ echoHold: true }, { echoHeld: true, earlyLook: true }));
 
 // ——————————————————————————————————————————————————————————————————————————— F7
 

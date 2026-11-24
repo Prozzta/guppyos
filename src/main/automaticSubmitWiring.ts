@@ -24,6 +24,8 @@ export interface OwnerPty {
   godInputGeneration?(id: string): number | undefined;
   godEnterAt?(id: string): number | undefined;
   lastHumanInputAt(id: string): number | undefined;
+  /** HELD-WAKE-ECHO-LAG-RELEASE: optional so a PTY without it skips the echo check. */
+  lastOutputAt?(id: string): number | undefined;
   hasOutput(id: string): boolean | undefined;
   inputState(id: string): TerminalInputState | undefined;
   promptState(id: string): TerminalPromptState | undefined;
@@ -106,6 +108,7 @@ export function buildOwnerDeps(w: OwnerWiring): OwnerDeps {
     godGeneration: (ptyId) => w.pty.godInputGeneration?.(ptyId),
     godEnterAt: (ptyId) => w.pty.godEnterAt?.(ptyId),
     lastHumanInputAt: (ptyId) => w.pty.lastHumanInputAt(ptyId),
+    lastOutputAt: (ptyId) => w.pty.lastOutputAt?.(ptyId),
     // THE OWNER'S ONLY WRITE. Declared PROGRAMMATIC, so it can never advance the human
     // generation — the owner must not be able to interfere with itself.
     write: (ptyId, data) => w.pty.write(ptyId, data, 'PROGRAMMATIC'),

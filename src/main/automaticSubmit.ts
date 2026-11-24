@@ -627,6 +627,9 @@ export interface OwnerDeps {
   /** When main last took a declared-HUMAN write on this PTY, set in the same operation
    *  as the write. Undefined = never. */
   lastHumanInputAt: (ptyId: string) => number | undefined;
+  /** HELD-WAKE-ECHO-LAG-RELEASE: when this PTY last printed anything (pty.ts stamps it on every
+   *  chunk). Undefined = no live session, or a host that cannot say: the echo check is skipped. */
+  lastOutputAt?: (ptyId: string) => number | undefined;
   abortCapability: (agentId: string) => AbortCapability;
   /** Read the rendered screen for `needle`. Resolves null when nothing can answer. */
   readScreen: (ptyId: string, needle: string, expectedTail?: string) => Promise<ScreenReading | null>;
@@ -1888,6 +1891,7 @@ export class AutomaticSubmitOwner {
     }
     const comp = judge();
     if (comp.cls !== 'READY') return stay(`${comp.cls}:${comp.reason}`, screen);
+    if (this.inputNotEchoed(ptyId)) return stay('input-not-echoed', screen);
     this.inhibited.delete(ptyId);
     if (held.decision) deps.capacity.cancelGrant(held.decision);
     this.releaseHeldId(held);
@@ -1966,6 +1970,21 @@ export class AutomaticSubmitOwner {
    *  God 8df2e3: god's send is a ruling even on a hold a person's keys are part of: a submit
    *  reported at or after god's `term` Enter (since the hold) ends it the same way. That link is
    *  CORRELATED, not proven (how: 'god-send'): the report does not say whose Enter it was. */
+  /** HELD-WAKE-ECHO-LAG-RELEASE: the last typed input (a person's or god's) has printed nothing
+   *  yet, so a clean composer proves nothing: the screen is the one of BEFORE the keys. Under load
+   *  a CLI echoed god's keys later than HUMAN_QUIET_MS; the look read the empty composer, released,
+   *  and the wake was staged again on top of the draft. Strictly later output only: an echo cannot
+   *  be stamped in the write's own millisecond, older output can.
+   *  BOUNDED by SCREEN_COMMIT_SLOW_BUDGET_MS, the owner's own limit for how late the echo of
+   *  typed text may land: past it a key that prints nothing (a no-op key) no longer holds.
+   *  KNOWN LIMIT: any output after the input counts, whether or not it is the echo. */
+  private inputNotEchoed(ptyId: string): boolean {
+    const last = this.deps.lastHumanInputAt(ptyId);
+    const out = this.deps.lastOutputAt?.(ptyId);
+    if (last === undefined || out === undefined) return false;
+    return out <= last && this.deps.now() - last < SCREEN_COMMIT_SLOW_BUDGET_MS;
+  }
+
   private godRuledHold(ptyId: string, held: HeldInterference): HeldRecheck | null {
     const by = this.inputSinceHold(ptyId, held);
     const enterAt = this.deps.godEnterAt?.(ptyId);

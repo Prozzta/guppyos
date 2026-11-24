@@ -202,6 +202,7 @@ async function buildFloor() {
     godInputGeneration: (id) => ptyManager.godInputGeneration(id),
     godEnterAt: (id) => ptyManager.godEnterAt(id),
     lastHumanInputAt: (id) => ptyManager.lastHumanInputAt(id),
+    lastOutputAt: (id) => ptyManager.lastOutputAt(id),   // HELD-WAKE-ECHO-LAG-RELEASE: the real stamp
     hasOutput: (id) => ptyManager.hasOutput(id),
     inputState: (id) => (ptyManager.incarnation(id) === undefined ? undefined : { mouseTrackingMode: 'none', inputOriginAttached: true, selfTest: 'pass' }),
     promptState: (id) => {
