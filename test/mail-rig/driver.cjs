@@ -53,6 +53,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const SLOW_STUB_MS = Number(process.env.RIG_SLOW_STUB_MS || 0);
 const slowed = (s) => (SLOW_STUB_MS > 0 ? { ...s, scenario: { ...(s.scenario || {}), slowStubMs: SLOW_STUB_MS } } : s);
 
+/** The text for one finished read. Get-WinEvent with no matching event exits 1 with empty stdout and stderr: that is "nothing",
+ *  not a failure. Any other failure keeps its first error line. */
+function eventLogReport(err, stdout, stderr) {
+  const t = String(stdout || '').trim();
+  if (t) return 'application event log, last 60 s:\n' + t;
+  const none = 'application event log, last 60 s: nothing for electron.exe or this pid';
+  if (!err || (err.code === 1 && !String(stderr || '').trim())) return none;
+  return none + ' (' + String(err.message).split('\n')[0] + ')';
+}
 /** F3-RIGHOST: on a -1 exit only, the Application event log's last 60 s for electron.exe or the host pid (WER, loader,
  *  AV). Best effort: never throws, bounded by its own 15 s timeout (killSignal ends the one pid; Get-WinEvent starts no
  *  children), windowsHide, and awaited before the reject so no process outlives it. Not Windows: an empty string. */
@@ -61,10 +70,7 @@ function applicationEventLog(pid) {
   const cmd = `Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddSeconds(-60)} -ErrorAction SilentlyContinue | Where-Object { $_.Message -like '*electron.exe*' -or $_.Message -like '*${pid}*' } | Select-Object -First 5 | ForEach-Object { $m = $_.Message.Replace([string][char]13, ' ').Replace([string][char]10, ' '); if ($m.Length -gt 300) { $m = $m.Substring(0, 300) }; '{0} id={1} {2}: {3}' -f $_.TimeCreated.ToString('o'), $_.Id, $_.ProviderName, $m }`;
   return new Promise((resolve) => {
     try {
-      execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', cmd], { env: psEnv(), windowsHide: true, timeout: 15_000, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 }, (err, stdout) => {
-        const t = String(stdout || '').trim();
-        resolve(t ? 'application event log, last 60 s:\n' + t : 'application event log, last 60 s: nothing for electron.exe or this pid' + (err ? ' (' + String(err.message).split('\n')[0] + ')' : ''));
-      });
+      execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', cmd], { env: psEnv(), windowsHide: true, timeout: 15_000, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 }, (err, stdout, stderr) => resolve(eventLogReport(err, stdout, stderr)));
     } catch (e) { resolve('application event log: not read (' + String(e.message).split('\n')[0] + ')'); }
   });
 }
@@ -611,4 +617,4 @@ async function waitFor(fn, { timeoutMs = 20_000, intervalMs = 60, what = 'condit
 const markersIn = (text) => [...String(text ?? '').matchAll(/\[hive-mail:([^\]]+)\]/g)].map((m) => m[1]);
 const REDELIVERED = '(re-delivered: this may already have been handled';
 
-module.exports = { startRig, waitFor, sleep, markersIn, REDELIVERED, scrubbedEnv, Rig, pidAlive, killTree };
+module.exports = { eventLogReport, startRig, waitFor, sleep, markersIn, REDELIVERED, scrubbedEnv, Rig, pidAlive, killTree };
