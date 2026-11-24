@@ -181,7 +181,7 @@ if (process.platform !== 'win32') {
     assert.match(agent, /_cleanUpProcess = function \(\) \{[^}]*\}\s*this\._inSocket\.readable = false;\s*this\._outSocket\.readable = false;\s*this\._outSocket\.destroy\(\);/, 'which destroys the data socket');
     assert.match(agent, /this\._outSocket\.on\('connect', function \(\) \{\s*_this\._outSocket\.emit\('ready_datapipe'\);/, 'ready_datapipe comes from the socket\'s connect event');
     const term = fs.readFileSync(path.join(NODE_PTY, 'lib', 'windowsTerminal.js'), 'utf8');
-    assert.match(term, /_this\._socket\.on\('ready_datapipe', function \(\) \{[\s\S]*?_this\._socket\.on\('close', function \(\) \{\s*_this\.emit\('exit', _this\._agent\.exitCode\);/, 'the exit is reported by a close listener added on ready_datapipe');
+    assert.match(term, /_this\._socket\.on\('ready_datapipe', function \(\) \{[\s\S]*?_this\._socket\.on\('close', function \(\) \{[^]*?\n {16}_this\.emit\('exit', _this\._agent\.exitCode\);\r?\n {16}_this\._close\(\);\r?\n {12}\}\);/, 'the exit is reported by a close listener added on ready_datapipe (PTY-NATURAL-EXIT-JOIN: or left by it for the exit report)');
   });
 
   test('READY handled after the flush second: nothing is thrown, the worker ends, the terminal exits once', async () => {

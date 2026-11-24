@@ -23,6 +23,8 @@
 // and (PTY-CONHOST-ORPHAN-OWNER-DEATH, option A: every PTY runs on the bundled OpenConsole):
 //  10 build/Release/conpty/{conpty.dll,OpenConsole.exe} are the pinned pair of one arch, unpacked
 //     (conpty.node loads <its dir>/conpty/conpty.dll; without it node-pty cannot start a PTY).
+// and (PTY-NATURAL-EXIT-JOIN, FLAKE-PTY-NATURAL-EXIT-READY-EXITCODE-UNDEFINED-108):
+//  11 lib/windowsTerminal.js is the pinned join form: a natural exit is reported with its code
 // PTY-HOLD-FIXTURE-ASAR-INVALID-PACKAGE-108: under Electron (ELECTRON_RUN_AS_NODE included) `fs`
 // shows a *.asar as a FOLDER: opening app.asar is EISDIR, and a walk goes into it. This tool must
 // read the archive as the file it is, and name it in a walk, so there it takes Electron's own
@@ -145,7 +147,7 @@ function inspect(dir) {
   if (entries) {
     const mine = entries.filter(([p]) => p.startsWith(`${NP}/`));
     const packed = mine.filter(([, e]) => e.unpacked !== true).map(([p]) => p);
-    const need = ['package.json', 'lib/windowsPtyAgent.js', 'lib/utils.js', 'lib/worker/conoutSocketWorker.js', BUILT, ...OPENCONSOLE].filter((rel) => !mine.some(([p]) => p === `${NP}/${rel}`));
+    const need = ['package.json', 'lib/windowsPtyAgent.js', 'lib/utils.js', 'lib/worker/conoutSocketWorker.js', 'lib/windowsTerminal.js', BUILT, ...OPENCONSOLE].filter((rel) => !mine.some(([p]) => p === `${NP}/${rel}`));
     const others = entries.filter(([p]) => (p === 'conpty.node' || p.endsWith('/conpty.node')) && p !== `${NP}/${BUILT}`).map(([p]) => p);
     const prebuilt = entries.filter(([p]) => WIN_PREBUILT.test(`/${p}`)).map(([p]) => p);
     asarWhy = need.length ? `app.asar does not list ${NP}/${need[0]}: the app would not load the files checked above`
@@ -170,6 +172,11 @@ function inspect(dir) {
   add(`OpenConsole ${pins.CONPTY_THIRD_PARTY_VERSION} ships in build/Release/conpty`, !!ocArch,
     ocMissing.length ? `build/Release/conpty/${ocMissing[0]} is missing: every PTY fails to start (run tools/stage-node-pty-openconsole.cjs before packaging)`
       : `the pair is ${oc.map(([n, s]) => `${n} ${short(s)}`).join(', ')}, not a pinned pair of one arch`);
+
+  // PTY-NATURAL-EXIT-JOIN: last, so the checks above keep their places.
+  const termSha = sha(at('lib/windowsTerminal.js'));
+  add('lib/windowsTerminal.js reports a natural exit with its code', termSha === pins.TERMINAL_JS_JOIN_SHA256,
+    termSha === pins.TERMINAL_JS_PRISTINE_SHA256 ? 'it is the UNPATCHED 1.1.0 file: a natural exit can be reported with an undefined code' : `sha256 ${short(termSha)} is not the pinned join form`);
   return { resources, checks };
 }
 
