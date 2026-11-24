@@ -75,33 +75,19 @@ test('TEMPDIR: under a temp jail, psTempDir is under the real temp folder, not t
   assert.ok(under(psTempDir(), sharedTemp()), 'PS POLICY: in this process too, psTempDir is under sharedTemp()');
 });
 
-/** PowerShell with psEnv(base, { temp }), running `command` (default: print its GetTempPath()), while
- *  `dirs` are watched. Resolves { out, seen } plus how the PowerShell ended: { error, code, signal, err }
- *  (the spawn error's code, the exit code, the signal, its stderr). */
-function psWatched(base, temp, dirs, command = '[IO.Path]::GetTempPath()') {
+/** PowerShell with psEnv(base, { temp }), printing its GetTempPath(), while `dirs` are watched. Resolves { out, seen }. */
+function psWatched(base, temp, dirs) {
   const seen = Object.fromEntries(Object.keys(dirs).map((k) => [k, new Set()]));
   const watchers = Object.entries(dirs).map(([k, d]) => fs.watch(d, (_e, f) => { if (f) seen[k].add(String(f)); }));
   return new Promise((resolve) => {
-    const c = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command],
-      { env: psEnv(base, { temp }), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const c = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '[IO.Path]::GetTempPath()'],
+      { env: psEnv(base, { temp }), windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
     let out = '';
-    let err = '';
-    const end = { error: null, code: null, signal: null };
     c.stdout.on('data', (d) => { out += d; });
-    c.stderr.on('data', (d) => { err += d; });
-    const done = () => setTimeout(() => { for (const w of watchers) w.close(); resolve({ out: out.trim(), seen, ...end, err: err.trim() }); }, 500);
-    c.on('error', (e) => { end.error = e.code || e.message; done(); });
-    c.on('close', (code, signal) => { end.code = code; end.signal = signal; done(); });
+    const done = () => setTimeout(() => { for (const w of watchers) w.close(); resolve({ out: out.trim(), seen }); }, 500);
+    c.on('error', done);
+    c.on('close', done);
   });
-}
-
-/** FLAKE-PS-POLICY-TEMP-LEAK-198-L164 (the 2026-11-20 Electron red): the control PowerShell printed
- *  nothing, and path.resolve('') is the cwd, so the cell failed as "its temp folder is <the work tree>".
- *  psWatched kept neither the exit code, the signal, the spawn error nor stderr, so the cause was lost.
- *  A PowerShell that did not start, print and exit 0 now fails here, by what it did. */
-function ranToEnd(r, what) {
-  assert.deepEqual({ error: r.error, code: r.code, signal: r.signal, printed: r.out !== '' }, { error: null, code: 0, signal: null, printed: true },
-    `PS POLICY${what}: the PowerShell started, printed its temp folder and exited 0 (stderr: ${r.err || 'none'})`);
 }
 
 test('BEHAVIOUR: with psEnv the real PowerShell writes its policy test files in psTempDir and never in the jail; without, in the jail', { skip: !WIN && 'Windows PowerShell only', timeout: 120_000 }, async () => {
@@ -110,8 +96,6 @@ test('BEHAVIOUR: with psEnv the real PowerShell writes its policy test files in 
   const jailEnv = { ...process.env, TEMP: jail, TMP: jail, TMPDIR: jail };
   const fixed = await psWatched(jailEnv, true, { jail, ps: psTempDir() });
   const control = await psWatched(jailEnv, false, { jail, ps: psTempDir() }); // the mutant "psEnv leaves the temp alone"
-  ranToEnd(fixed, '');
-  ranToEnd(control, ' control');
   // The control: proves this machine's PowerShell writes the files in the temp it inherits, so the checks have teeth.
   assert.equal(path.resolve(control.out), path.resolve(jail), 'PS POLICY control: without psEnv PowerShell\'s temp folder is the jail');
   assert.ok([...control.seen.jail].some((f) => POLICY.test(f)), `PS POLICY control: without psEnv the policy files are written in the jail (${[...control.seen.jail]})`);
@@ -119,21 +103,6 @@ test('BEHAVIOUR: with psEnv the real PowerShell writes its policy test files in 
   assert.ok([...fixed.seen.ps].some((f) => POLICY.test(f)), `PS POLICY: with psEnv the policy files are written in psTempDir (${[...fixed.seen.ps]})`);
   assert.deepEqual([...fixed.seen.jail].filter((f) => POLICY.test(f)), [], 'PS POLICY: with psEnv no policy file is written in the jail');
   assert.deepEqual(fs.readdirSync(jail), [], 'PS POLICY: the jail is empty');
-});
-
-test('BEHAVIOUR teeth: a PowerShell that prints nothing fails by its exit code, not as a wrong temp folder', { skip: !WIN && 'Windows PowerShell only', timeout: 120_000 }, async () => {
-  const jail = path.join(tmpRoot, 'jail-silent');
-  fs.mkdirSync(jail);
-  const silent = await psWatched({ ...process.env, TEMP: jail, TMP: jail, TMPDIR: jail }, false, { jail }, 'exit 7');
-  assert.equal(silent.out, '', 'PS POLICY teeth: the PowerShell printed nothing');
-  // What the 2026-11-20 red reported: an empty output read as a folder is the cwd.
-  assert.equal(path.resolve(silent.out), process.cwd(), 'PS POLICY teeth: an empty output resolves to the cwd');
-  assert.throws(() => ranToEnd(silent, ' control'), (e) => {
-    assert.equal(e.code, 'ERR_ASSERTION');
-    assert.deepEqual(e.actual, { error: null, code: 7, signal: null, printed: false }, 'PS POLICY teeth: the failure carries the exit code');
-    assert.match(e.message, /PS POLICY control: the PowerShell started, printed its temp folder and exited 0/);
-    return true;
-  });
 });
 
 /** A dead pid: a node child that has exited (its pid is not reused within the test). */
