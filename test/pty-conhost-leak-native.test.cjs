@@ -119,24 +119,39 @@ function hostChildren() {
   });
 }
 
-/** One terminal through the manager; `end` ends it. Resolves once its host is gone, or fails naming it. */
-async function hostGoneAfter(t, script, end, how) {
+/**
+ * CONHOST-LEAK-NATIVE-CLEANUP-KILL-IDENTITY-108: ends the process that has `pid`. Resolves with HOST_ENDED, or with
+ * HOST_GONE when the pid has no process. It never rejects.
+ */
+const HOST_ENDED = 0, HOST_GONE = 3, HOST_NOT_OURS = 4, HOST_NO_IDENTITY = 5, HOST_CHECK_FAILED = 6;
+function endOwnHost(pid) {
+  return new Promise((res) => { try { process.kill(pid); res(HOST_ENDED); } catch { res(HOST_GONE); } });
+}
+
+/**
+ * One terminal through the manager; `end` ends it. Resolves once its host is gone, or fails naming it.
+ * `alsoListed` is for the cleanup's own test only: rows [pid, name] put on the list of this terminal's hosts as if the
+ * listing had named them.
+ */
+async function hostGoneAfter(t, script, end, how, alsoListed = []) {
   const { PtyManager } = loadTs('src/main/pty.ts');
   const node = consoleNode();
   t.diagnostic(`PTY child: ${node.file} ${node.version} (from ${node.from})`);
   const m = new PtyManager();
   const id = `conhost-leak-${process.pid}-${seq += 1}`;
+  const born = Date.now();   // before the terminal exists: its host is not older
   const before = await hostChildren();
   assert.deepEqual(await m.spawn({ id, cwd: process.cwd(), command: node.file, args: ['-e', script], cols: 80, rows: 24 }), { ok: true });
   const proc = m.sessions.get(id).proc;
   const exited = new Promise((res) => proc.onExit(res));
   const firstOutput = new Promise((res) => { const sub = proc.onData(() => { sub.dispose(); res(); }); });
   const mine = [...(await hostChildren())].filter(([pid]) => !before.has(pid));
+  const listed = mine.concat(alsoListed);
+  let left = mine;
   try {
     assert.equal(mine.length, 1, `the listing sees this terminal's console host: exactly one new host child, got ${JSON.stringify(mine)}`);
     await end({ m, id, proc, firstOutput });
     await exited;
-    let left = mine;
     for (let n = 0; n < LISTINGS && left.length; n += 1) {
       const now = await hostChildren();
       left = mine.filter(([pid]) => now.has(pid));
@@ -145,9 +160,64 @@ async function hostGoneAfter(t, script, end, how) {
       + `${left.map(([pid, name]) => `${name} pid ${pid}`).join(', ')} is still a child of this process (the pseudoconsole was never closed)`);
   } finally {
     if (m.sessions.has(id)) m.kill(id);
-    for (const [pid] of mine) { try { process.kill(pid); } catch { /* gone, as it should be */ } }
+    for (const [pid] of listed) await endOwnHost(pid, process.pid, born);
   }
 }
+
+/** A process of this test that is no console host: what a reused pid names. `ended` resolves when it ends. */
+function standIn(t) {
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true });
+  const ended = new Promise((res) => { child.once('exit', (code, signal) => res({ code, signal })); child.once('error', (e) => res({ error: e.message })); });
+  t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill(); await ended; });
+  // Still running after one completed listing: a kill sent before would have been reported long before that.
+  const alive = async () => Promise.race([ended, hostChildren().then(() => null)]);
+  return { pid: child.pid, alive };
+}
+
+test('CLEANUP KILL IDENTITY: a pid on the terminal\'s host list is not killed once the host is proved gone (the pid may name another process by then)',
+  { skip: !WIN, timeout: 120_000 }, async (t) => {
+    const other = standIn(t);
+    assert.ok(Number.isInteger(other.pid), 'the stand-in started');
+    await hostGoneAfter(t, 'setInterval(() => {}, 1000)', async ({ m, id }) => { assert.deepEqual(m.kill(id), { ok: true }); },
+      'PtyManager.kill ended it', [[other.pid, 'conhost.exe']]);
+    assert.equal(await other.alive(), null, `THE CLEANUP KILLED A PROCESS THAT IS NOT ITS HOST: pid ${other.pid} was on the list, and after the terminal's host was gone the cleanup ended it`);
+  });
+
+test('CLEANUP KILL IDENTITY: endOwnHost refuses a pid that names a process which is not a console host', { skip: !WIN, timeout: 120_000 }, async (t) => {
+  const born = Date.now();
+  const other = standIn(t);
+  assert.ok(Number.isInteger(other.pid), 'the stand-in started');
+  // Its parent is this process and it was made after `born`: only its name says it is no console host.
+  const code = await endOwnHost(other.pid, process.pid, born);
+  assert.equal(await other.alive(), null, `endOwnHost ended pid ${other.pid}, a process that is no console host (it answered ${code})`);
+  assert.equal(code, HOST_NOT_OURS, 'endOwnHost says it refused the pid');
+});
+
+test('CLEANUP KILL IDENTITY: endOwnHost ends a live console host of this process, and only under its real parent and birth', { skip: !WIN, timeout: 120_000 }, async (t) => {
+  const { PtyManager } = loadTs('src/main/pty.ts');
+  const node = consoleNode();
+  const m = new PtyManager();
+  const id = `conhost-leak-${process.pid}-${seq += 1}`;
+  const born = Date.now();
+  const before = await hostChildren();
+  assert.deepEqual(await m.spawn({ id, cwd: process.cwd(), command: node.file, args: ['-e', 'setInterval(() => {}, 1000)'], cols: 80, rows: 24 }), { ok: true });
+  try {
+    const mine = [...(await hostChildren())].filter(([pid]) => !before.has(pid));
+    assert.equal(mine.length, 1, `the listing sees this terminal's console host: exactly one new host child, got ${JSON.stringify(mine)}`);
+    const host = mine[0][0];
+    t.diagnostic(`host: ${mine[0][1]} pid ${host}`);
+    assert.equal(await endOwnHost(host, process.ppid, born), HOST_NOT_OURS, 'a host whose parent is not the one named is refused');
+    assert.ok((await hostChildren()).has(host), 'and it is still there');
+    assert.equal(await endOwnHost(host, process.pid, Date.now() + 3_600_000), HOST_NOT_OURS, 'a host made before the birth named is refused');
+    assert.ok((await hostChildren()).has(host), 'and it is still there');
+    assert.equal(await endOwnHost(host, process.pid, born), HOST_ENDED, 'the host under its real parent and birth is ended');
+    let now = await hostChildren();
+    for (let n = 0; n < LISTINGS && now.has(host); n += 1) now = await hostChildren();
+    assert.equal(now.has(host), false, `the host is gone from the listing: pid ${host}`);
+  } finally {
+    if (m.sessions.has(id)) m.kill(id);
+  }
+});
 
 test('PTY-CONHOST-LEAK: a terminal whose program ends by itself releases its console host', { skip: !WIN, timeout: 120_000 }, async (t) => {
   // The child ends when a flag file appears, so the first listing is taken while it is certainly alive.
