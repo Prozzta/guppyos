@@ -263,5 +263,25 @@ function stopsNaming(pid) {
     return ` [own-procs stops: pid ${pid} was handed to a stop script (handed, not proven stopped): ${hit.slice(0, 5).map((r) => `${r.name} created=${r.created} ppid=${r.ppid} rule=${r.rule} by ${r.file} (pid ${r.by}) at ${at(r.t)}`).join('; ')}${hit.length > 5 ? `; and ${hit.length - 5} more` : ''}]`;
   } catch { return ''; }
 }
+/**
+ * FS-REMOVE-GAP-RACE-FAILED-PID-JOURNAL-108: the same for the preload's <starts>.kills (beside <starts>.stops):
+ * the process.kill / taskkill rows made by a run's test file that name `pid` at or after `sinceMs` (the child's
+ * spawn; an earlier row named an older owner of the number). '' outside a run.
+ */
+function killsNaming(pid, sinceMs = -Infinity) {
+  try {
+    const j = stopsJournal();
+    if (!j || !/\.stops$/.test(j.stops)) return '';
+    let rows = [];
+    try {
+      rows = fs.readFileSync(j.stops.replace(/\.stops$/, '.kills'), 'utf8').split(/\r?\n/).map((l) => { try { return JSON.parse(l); } catch { return null; } })
+        .filter((r) => r && typeof r === 'object' && Array.isArray(r.targets) && Number.isFinite(r.t));
+    } catch { /* no kills file yet: no kill by number was recorded */ }
+    const hit = rows.filter((r) => r.targets.includes(pid) && r.t >= sinceMs);
+    const at = (t) => { try { return new Date(t).toISOString(); } catch { return String(t); } };
+    if (!hit.length) return ` [kills: none of ${rows.length} rows names pid ${pid} since its spawn; only a run file's own process.kill/taskkill is recorded]`;
+    return ` [kills: ${hit.slice(0, 5).map((r) => `pid ${pid} was named by a kill (${r.via || 'kill'}) from ${r.file || 'an unnamed file'} (pid ${r.pid}) at ${at(r.t)}`).join('; ')}${hit.length > 5 ? `; and ${hit.length - 5} more` : ''}]`;
+  } catch { return ''; }
+}
 
-module.exports = { runPowershell, ORPHAN_LEAD_MS, BIRTH_SLACK_MS, bornNow, parseRows, sameProcess, childrenOf, treeOf, ownTree, ownTreeOrThrow, cutAfter, stillOurs, readRec, killVerified, killOwnTree, processTable, lookupPids, stopScript, stopIfSame, powershellStarts };
+module.exports = { runPowershell, ORPHAN_LEAD_MS, BIRTH_SLACK_MS, bornNow, parseRows, sameProcess, childrenOf, treeOf, ownTree, ownTreeOrThrow, cutAfter, stillOurs, readRec, killVerified, killOwnTree, processTable, lookupPids, stopScript, stopIfSame, powershellStarts, stopsNaming, killsNaming };

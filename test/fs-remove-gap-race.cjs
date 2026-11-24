@@ -238,10 +238,23 @@ async function race(impl, base, runs, seconds) {
  * could not say whether the child threw (stderr has the stack) or was ended from outside (stderr
  * is empty).
  */
-function noResult(err, stdout, stderr) {
+function noResult(err, stdout, stderr, child = null) {
   const tail = (s, n) => { const v = String(s || '').trim(); return v ? (v.length > n ? `[... ${v.length - n} more before] ${v.slice(-n)}` : v) : '(empty)'; };
   const how = err ? `exit ${err.code === undefined ? '?' : err.code}, signal ${err.signal || 'none'}${err.killed ? ', killed by this process' : ''}` : 'exit 0';
-  return `no result: ${how}, at ${new Date().toISOString()}; stderr: ${tail(stderr, 1200)}; stdout: ${tail(stdout, 300)}; ${err ? String(err.message).split('\n')[0] : 'no error'}`;
+  const ended = new Date().toISOString();
+  return `no result: ${how}, at ${ended}; stderr: ${tail(stderr, 1200)}; stdout: ${tail(stdout, 300)}; ${err ? String(err.message).split('\n')[0] : 'no error'}${whose(child, ended)}`;
+}
+
+/**
+ * FS-REMOVE-GAP-RACE-FAILED-PID-JOURNAL-108: which racer it was, in the own-procs failure line's style: its pid and
+ * spawn time, then the run's stops journal rows (own-procs stopsNaming) and <starts>.kills rows that name the pid.
+ * Stop-Process -Force leaves exit 4294967295 and no output, so the next such death says whether one of the run's
+ * stop scripts was handed that pid ('none of N rows' points away from them). The lookups say nothing outside a run.
+ */
+function whose(child, ended) {
+  if (!child || !Number.isInteger(child.pid) || child.pid <= 0) return '';
+  const P = require('./tools/own-procs.cjs');
+  return ` [race child pid=${child.pid} started=${new Date(child.spawnedMs).toISOString()} ended=${ended}]${P.stopsNaming(child.pid)}${P.killsNaming(child.pid, child.spawnedMs)}`;
 }
 
 /** Run `racers` races of each impl at once, each in its own temp folder; returns the totals per impl. */
@@ -254,9 +267,10 @@ async function many(impls, racers, runs, seconds) {
     for (let i = 0; i < racers; i++) {
       const base = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), `fs-gap-${impl}-`));
       jobs.push(new Promise((resolve) => {
-        child.execFile(exe, [__filename, 'race', impl, base, String(runs), String(seconds)], { env, windowsHide: true, maxBuffer: 1 << 24 }, (err, stdout, stderr) => {
+        const spawnedMs = Date.now();
+        const racer = child.execFile(exe, [__filename, 'race', impl, base, String(runs), String(seconds)], { env, windowsHide: true, maxBuffer: 1 << 24 }, (err, stdout, stderr) => {
           let res;
-          try { res = JSON.parse(stdout.trim().split('\n').pop()); } catch { res = { ok: false, whole: true, error: noResult(err, stdout, stderr) }; }
+          try { res = JSON.parse(stdout.trim().split('\n').pop()); } catch { res = { ok: false, whole: true, error: noResult(err, stdout, stderr, { pid: racer.pid, spawnedMs }) }; }
           try { sweep(base); } catch { /* left in the temp folder */ }
           resolve({ impl, res });
         });
