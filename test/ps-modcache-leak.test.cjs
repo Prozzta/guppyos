@@ -118,6 +118,7 @@ const KNOWN = {
   'electron-harness/electron-bin.cjs': 1,
   'heavy-cpu-options-191.test.cjs': 1, // FLAKE-HEAVY-CPU-OPTIONS-191-B1: the B1 query moved with its cell (the perf row below)
   'heavy-job-lock.test.cjs': 1,
+  'heavy-lock-release-lag-197.test.cjs': 1, // LAG197-MEMBER-KILL-IDENTITY-108: the member kill by held handle
   'mail-rig/driver.cjs': 1, // FLAKE-MAILRIG-F3-RIGHOST-STARTUP-EXIT-108: the event-log read on a -1 rig-host exit
   'mutant-runners-tap.test.cjs': 1,
   'perf/heavy-cpu-live-bash-b1.perf.cjs': 1, // INT 1.1.102: cap-199's known-folder query (B1), now in the serial perf lane
