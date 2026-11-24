@@ -128,6 +128,60 @@ test('FLAKE-RIG-ELECTRON-LEG-CONSOLE-NODE-VERSION-FAIL-108: a console node that 
   assert.match(long, /\(5000 chars, first 400\)/);
 });
 
+// FLAKE-RIG-ELECTRON-LEG-CONSOLE-NODE-VERSION-FAIL-108, step 2. An exit code says how the child ended, not
+// who ended it: without the child's pid the line could not be set beside the run's stops journal (own-procs
+// stop scripts) or its kills journal (a run file's process.kill / taskkill). The failure names the pid and
+// its spawn time, and the rows of both journals that carry that pid since the spawn, or that none does.
+// The journals here are made-up files put on this process under the key file-backstop-preload.cjs uses.
+test('FLAKE-RIG-ELECTRON-LEG-CONSOLE-NODE-VERSION-FAIL-108: a console node that fails --version is reported with its pid and the stops and kills journal rows that name it', (t) => {
+  const file = consoleNode().file;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'console-node-journal-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const stops = path.join(dir, 'starts.stops');
+  const kills = path.join(dir, 'starts.kills');
+  const KEYSYM = Symbol.for('guppy.file-backstop');
+  // the rows are written while the child "runs", as a neighbour's would be: after the spawn time
+  const failing = (fields) => () => {
+    const row = (o) => `${JSON.stringify(o)}\n`;
+    fs.writeFileSync(stops,
+      row({ t: Date.now(), pid: 1, ppid: 0, name: 'other.exe', created: 1, rule: 'other', file: 'other.test.cjs', by: 1 })
+      + row({ t: Date.now(), pid: 4242, ppid: 7, name: 'node.exe', created: 11, rule: 'CONSOLE-NODE-UNIT-RULE', file: 'console-node-neighbour.test.cjs', by: 5151 }));
+    fs.writeFileSync(kills,
+      row({ pid: 6161, file: 'older-owner.test.cjs', via: 'process.kill', targets: [4242], t: 1 })   // before the spawn: an older owner of the number
+      + row({ pid: 6262, file: 'console-node-killer.test.cjs', via: 'taskkill', targets: [9, 4242], t: Date.now() }));
+    throw Object.assign(new Error(`Command failed: ${file} --version`), fields);
+  };
+  const message = (fields, journal = true) => {
+    const had = Object.prototype.hasOwnProperty.call(process, KEYSYM);
+    const prev = process[KEYSYM];
+    if (journal) process[KEYSYM] = { stops, file: 'onbinary-drop.test.cjs' }; else delete process[KEYSYM];
+    try { assertConsoleNode(file, 'UNIT', { run: failing(fields) }); } catch (e) { return e.message; } finally {
+      if (had) process[KEYSYM] = prev; else delete process[KEYSYM];
+    }
+    return assert.fail('a failing --version must throw');
+  };
+  // a pid with a row in each journal: the pid, its spawn time, and both rows
+  const named = message({ pid: 4242, status: 1, signal: null, stderr: '', stdout: '' });
+  assert.match(named, /\[pid 4242, started \d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z, exit code 1 \(0x00000001\), /, named);
+  assert.ok(named.includes(' [own-procs stops: pid 4242 was handed to a stop script (handed, not proven stopped): node.exe created=11 ppid=7 rule=CONSOLE-NODE-UNIT-RULE by console-node-neighbour.test.cjs (pid 5151)'), `THE STOPS ROW IS NAMED: ${named}`);
+  assert.ok(named.includes(' [kills: pid 4242 was named by a kill (taskkill) from console-node-killer.test.cjs (pid 6262)'), `THE KILLS ROW IS NAMED: ${named}`);
+  assert.ok(!named.includes('older-owner.test.cjs'), `a kills row from before the spawn names an older owner of the number: ${named}`);
+  // control: a pid no row carries says so for both journals, and names no file
+  const unnamed = message({ pid: 4343, status: 4294967295, signal: null, stderr: '', stdout: '' });
+  assert.match(unnamed, /\[pid 4343, started /);
+  assert.ok(unnamed.includes(' [own-procs stops: none of 2 rows names pid 4343; a row means handed to a stop script, not stopped]'), `NO STOPS ROW IS SAID: ${unnamed}`);
+  assert.ok(unnamed.includes(' [kills: none of 2 rows names pid 4343 since its spawn;'), `NO KILLS ROW IS SAID: ${unnamed}`);
+  assert.ok(!unnamed.includes('console-node-neighbour.test.cjs') && !unnamed.includes('console-node-killer.test.cjs'), unnamed);
+  // never started: no pid, and no journal is asked about a pid that does not exist
+  const notStarted = message({ code: 'EPERM' });
+  assert.match(notStarted, /\[pid none, started /);
+  assert.ok(!notStarted.includes('own-procs stops') && !notStarted.includes('[kills:'), notStarted);
+  // outside a run there is no journal: the pid is still named, and nothing is said about rows
+  const alone = message({ pid: 4242, status: 1, signal: null, stderr: '', stdout: '' }, false);
+  assert.match(alone, /\[pid 4242, started /);
+  assert.ok(!alone.includes('own-procs stops') && !alone.includes('[kills:'), alone);
+});
+
 // ONBINARY-DROP-ELECTRON-FILE-NEVER-EXITS-108. electron.exe is a GUI-subsystem program: Windows does not
 // attach it to the pseudoconsole, so (also as Node) it prints nothing to the PTY and reads nothing from it.
 // node-pty holds kill() back until a terminal's first data chunk, and its exit path frees only the output
