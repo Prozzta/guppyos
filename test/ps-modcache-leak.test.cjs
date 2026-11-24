@@ -123,7 +123,7 @@ const KNOWN = {
   'perf/heavy-cpu-live-bash-b1.perf.cjs': 1, // INT 1.1.102: cap-199's known-folder query (B1), now in the serial perf lane
   'own-procs-pid-recycle.test.cjs': 1, // OWNPROCS-STOPPROCESS-THROW-108: terminal Stop-Process race behavior pin
   'ps-policy-temp-leak-198.test.cjs': 2,
-  'pty-conhost-leak-native.test.cjs': 2, // PTY-CONHOST-LEAK-NATIVE: the console-host listing, and the end of a host a manager left
+  'pty-conhost-leak-native.test.cjs': 3, // PTY-CONHOST-LEAK-NATIVE: the console-host listing, and the end of a host a manager left; CONHOST-LEAK-NATIVE-CLEANUP-KILL-IDENTITY-108: + endOwnHost, the cleanup's kill by held handle
   'rebrand-a-182.test.cjs': 1,
   'rebrand-updater-base-183.test.cjs': 1,
   'test-runner-glob.test.cjs': 1,

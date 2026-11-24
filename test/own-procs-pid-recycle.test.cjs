@@ -279,7 +279,10 @@ const PPID_ALLOW = {
   // PTY-CONHOST-LEAK-NATIVE: the console hosts of one process, each with its CreationDate check on the same line
   // (no older than the parent itself; for a manager that has ended, no older than the time taken before it started)
   'pty-conhost-leak-native.test.cjs': [/ParentProcessId=\$\{process\.pid\}" \| Where-Object \{ \$_\.CreationDate -ge \$me\.CreationDate \}/,
-    /ParentProcessId=\$\{parent\}" \| Where-Object \{ \$_\.CreationDate -ge \[DateTimeOffset\]::FromUnixTimeMilliseconds\(\$\{born\}\)\.LocalDateTime \}/]
+    /ParentProcessId=\$\{parent\}" \| Where-Object \{ \$_\.CreationDate -ge \[DateTimeOffset\]::FromUnixTimeMilliseconds\(\$\{born\}\)\.LocalDateTime \}/,
+    // CONHOST-LEAK-NATIVE-CLEANUP-KILL-IDENTITY-108: endOwnHost's check of ONE process under a held handle, its
+    // parent and its start time (no older than the time taken before the terminal started) on the same line
+    /\$row\.ParentProcessId -ne \$\{parent\} -or \$ms -lt \$\{born\} -or /]
 };
 test('PIN (all of test/): no tree walk by ParentProcessId alone outside own-procs (an allow-list, each entry a listing or checked)', () => {
   const bad = hits(PPID).filter((h) => !(PPID_ALLOW[h.file] || []).some((re) => re.test(h.text)));

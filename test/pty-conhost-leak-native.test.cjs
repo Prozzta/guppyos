@@ -120,12 +120,39 @@ function hostChildren() {
 }
 
 /**
- * CONHOST-LEAK-NATIVE-CLEANUP-KILL-IDENTITY-108: ends the process that has `pid`. Resolves with HOST_ENDED, or with
- * HOST_GONE when the pid has no process. It never rejects.
+ * CONHOST-LEAK-NATIVE-CLEANUP-KILL-IDENTITY-108: ends `pid` only if it is still a console host that `parent` made at or
+ * after `born` (ms). A pid is only a number: once its process has ended Windows gives it to another one, and a bare
+ * process.kill(pid) from this file's cleanup once ended the process running another test file. So one PowerShell opens
+ * a handle to the process first (while the handle is held the pid cannot be given away), checks under it that the
+ * process is that host, and only then ends it (the pattern of heavy-lock-release-lag-197's killMember).
+ * Resolves with an exit code, or with `error <code>` when PowerShell could not start. It never rejects.
+ * The codes: HOST_ENDED, it was that host and is ended; HOST_GONE, the pid has no process; HOST_NOT_OURS, the pid
+ * names another process (not killed); HOST_NO_IDENTITY, the arguments cannot be checked (not killed);
+ * HOST_CHECK_FAILED, the check or the kill threw (not killed by the check).
  */
 const HOST_ENDED = 0, HOST_GONE = 3, HOST_NOT_OURS = 4, HOST_NO_IDENTITY = 5, HOST_CHECK_FAILED = 6;
-function endOwnHost(pid) {
-  return new Promise((res) => { try { process.kill(pid); res(HOST_ENDED); } catch { res(HOST_GONE); } });
+function endOwnHostScript(pid, parent, born) {
+  const names = [...HOSTS].map((n) => `'${n.replace(/\.exe$/, '')}'`).join(',');
+  return `$ErrorActionPreference = 'Stop'
+try { $p = [System.Diagnostics.Process]::GetProcessById(${pid}); $null = $p.Handle } catch { exit ${HOST_GONE} }
+try {
+  if ($p.HasExited) { exit ${HOST_GONE} }
+  $ms = ([DateTimeOffset]$p.StartTime).ToUnixTimeMilliseconds()
+  $row = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"
+  if (-not $row) { exit ${HOST_GONE} }
+  if ($row.ParentProcessId -ne ${parent} -or $ms -lt ${born} -or @(${names}) -notcontains $p.ProcessName.ToLower()) { exit ${HOST_NOT_OURS} }
+  $p.Kill()
+} catch { exit ${HOST_CHECK_FAILED} }
+exit ${HOST_ENDED}`;
+}
+function endOwnHost(pid, parent, born) {
+  return new Promise((res) => {
+    if (![pid, parent, born].every((n) => Number.isInteger(n) && n > 0)) { res(HOST_NO_IDENTITY); return; }
+    const ps = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(endOwnHostScript(pid, parent, born), 'utf16le').toString('base64')],
+      { stdio: 'ignore', windowsHide: true, env: psEnv() });
+    ps.once('error', (e) => res(`error ${e.code}`));
+    ps.once('exit', (code) => res(code));
+  });
 }
 
 /**
@@ -147,20 +174,22 @@ async function hostGoneAfter(t, script, end, how, alsoListed = []) {
   const firstOutput = new Promise((res) => { const sub = proc.onData(() => { sub.dispose(); res(); }); });
   const mine = [...(await hostChildren())].filter(([pid]) => !before.has(pid));
   const listed = mine.concat(alsoListed);
-  let left = mine;
+  let left = listed;   // what the last listing still named; until a listing has run, all of them
   try {
     assert.equal(mine.length, 1, `the listing sees this terminal's console host: exactly one new host child, got ${JSON.stringify(mine)}`);
     await end({ m, id, proc, firstOutput });
     await exited;
     for (let n = 0; n < LISTINGS && left.length; n += 1) {
       const now = await hostChildren();
-      left = mine.filter(([pid]) => now.has(pid));
+      left = listed.filter(([pid]) => now.has(pid));
     }
     assert.deepEqual(left, [], `THE CONSOLE HOST OUTLIVES ITS TERMINAL: ${how}, and ${LISTINGS} listings after the exit was reported `
       + `${left.map(([pid, name]) => `${name} pid ${pid}`).join(', ')} is still a child of this process (the pseudoconsole was never closed)`);
   } finally {
     if (m.sessions.has(id)) m.kill(id);
-    for (const [pid] of listed) await endOwnHost(pid, process.pid, born);
+    // Only what the last listing still named, and each only after endOwnHost's own check: a host proved gone has
+    // left its pid to whoever Windows gave it to next.
+    for (const [pid] of left) await endOwnHost(pid, process.pid, born);
   }
 }
 
