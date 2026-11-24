@@ -210,6 +210,54 @@ test('the async log tail is one of the reads: the wait covers its open handle, a
   assert.equal(g.calls, 2, 'a log tail asked for after dispose() opened the log');
 });
 
+/**
+ * FLAKE-HIVE-READ-DRAIN-186-GATED-READ-NEVER-STARTED-108. A gate on fs.promises.readdir for the
+ * hive folder: the folder listing (filesInOrderAsync) that logTailAsync makes before it opens the
+ * log. It goes to the thread pool, so under suite load it can take longer than any fixed number of
+ * turns. Every listing asked for while held waits; release() lets them all go.
+ */
+function gateListing(t, hive) {
+  const dir = path.resolve(hive.root());
+  const real = fs.promises.readdir;
+  const l = { calls: 0, held: true, waiting: [], release: () => { l.held = false; for (const go of l.waiting.splice(0)) go(); } };
+  fs.promises.readdir = async function gatedReaddir(p, ...rest) {
+    if (path.resolve(String(p)) !== dir) return real.call(fs.promises, p, ...rest);
+    l.calls++;
+    if (l.held) await new Promise((go) => { l.waiting.push(go); });
+    return real.call(fs.promises, p, ...rest);
+  };
+  t.after(() => { l.release(); fs.promises.readdir = real; });
+  return l;
+}
+
+test('the wait for the gated log open is not a turn count: a folder listing slower than the old 200 turns still ends at the gate', async (t) => {
+  const w = await world(t);
+  const g = gateLogOpen(t, w.hive);
+  const l = gateListing(t, w.hive);
+  g.gated = true;
+  const tailing = w.hive.logTailAsync(5);
+  const reaching = until(() => g.open === 1);
+  let reached = false;
+  reaching.then(() => { reached = true; }, () => {});
+  try {
+    // What a loaded thread pool does to the listing, made certain: it is held for more turns than
+    // the old wait counted (200). This is how long the listing is held, not a bound on any wait.
+    for (let i = 0; i < 300; i++) await turn();
+    assert.ok(l.calls >= 1, 'control: the tail lists the hive folder before it opens the log');
+    assert.equal(g.calls, 0, 'control: the log open waits behind the held listing');
+    assert.equal(reached, false, 'the wait ended before the log open had reached its gate');
+    l.release();
+    await reaching;
+    assert.equal(g.open, 1, 'the wait ended at the gated open');
+  } catch (e) {
+    // A red here must not leave the tail held: the teardown's drainReads() would wait for it.
+    g.gated = false; g.release(); l.release();
+    throw e;
+  }
+  g.release();
+  assert.ok((await tailing).length > 0, 'control: the held tail still returns rows');
+});
+
 test('reset and home change wait for the open reads between dispose() and touching the folder', () => {
   const src = codeOnly(readSource('src/main/index.ts'), 'index.ts');
   const order = (label, from, marks) => {
