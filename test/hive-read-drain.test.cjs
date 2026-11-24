@@ -127,7 +127,9 @@ test('an authority read is one of the reads: the wait covers it, and after dispo
   assert.equal(typeof realFallback, 'function', 'the missed-watch fallback is still HiveManager.revalidateAuthoritiesAsync');
   const fallback = { stopped: false, flying: Promise.resolve() };
   proto.revalidateAuthoritiesAsync = function () {
-    return fallback.stopped ? Promise.resolve() : (fallback.flying = realFallback.call(this));
+    // Chained, not replaced: a tick that finds an older one still running returns at once, and
+    // the wait below must still cover the older one.
+    return fallback.stopped ? Promise.resolve() : (fallback.flying = Promise.all([fallback.flying, realFallback.call(this)]));
   };
   t.after(() => { proto.revalidateAuthoritiesAsync = realFallback; });
   const w = await world(t);
