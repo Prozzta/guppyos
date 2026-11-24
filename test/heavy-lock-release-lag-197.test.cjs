@@ -28,6 +28,7 @@ const { spawn, spawnSync } = require('node:child_process');
 const loadTs = require('./load-ts.cjs');
 const { gitBash, findGitBash, candidates } = require('./tools/git-bash.cjs');
 const own = require('./tools/own-procs.cjs');
+const { psEnv } = require('./tools/ps-env.cjs');
 
 const root = path.join(__dirname, '..');
 const CPU_FILE = 'src/main/heavyCpu.ts';
@@ -612,13 +613,38 @@ async function liveRelease(t, o) {
   return { member, helperTrace, stillIn, lagMs: rel ? rel.ts - exitAt : null, relAt: rel ? rel.ts : null, lastSentAt: lastSent.at, lastSentPid: lastSent.pid, afterEndMs: rel ? rel.ts - jobEndAt : null, exitAt, jobEndAt, runMs: exitAt - t0, heldMs: rel ? rel.heldMs : null, reason: rel ? rel.reason : null, rows, shellAliveAtRelease, code: exit.code, signal: exit.signal, kills, shellPid: sh.pid, lists, t0 };
 }
 
-/** LAG197-MEMBER-KILL-IDENTITY-108: ends one member the job tool listed (a row { pid, name, createdMs }). Resolves with
- *  the kill tool's exit code, or `error <code>` when it could not start; never rejects. */
+/** LAG197-MEMBER-KILL-IDENTITY-108: ends one member the job tool listed (a row { pid, name, createdMs }), and only while
+ *  its pid still names that member. A member can end between the list and its kill, and Windows can give its pid to an
+ *  unrelated process. So one PowerShell first opens a handle to the pid. A held handle keeps Windows from giving the pid
+ *  to another process, so the name and birth it checks next (read through that handle) belong to the process the kill
+ *  will end. The kill itself is still taskkill /F, run while the handle is held, so the target still ends with exit 1
+ *  (KILLED_EXIT). The birth is matched to 1 ms, as file-job.cs's kill does.
+ *  Resolves with an exit code, or with `error <code>` when PowerShell could not start. It never rejects.
+ *  The codes: taskkill's own (0 killed, 128 not found); MEMBER_GONE, the pid has no process; MEMBER_NOT_OURS, the pid
+ *  names another process (not killed); MEMBER_NO_IDENTITY, the row cannot be checked (not killed); MEMBER_CHECK_FAILED,
+ *  the check threw (not killed). */
+const MEMBER_GONE = 3, MEMBER_NOT_OURS = 4, MEMBER_NO_IDENTITY = 5, MEMBER_CHECK_FAILED = 6;
+function memberKillScript(row, base) {
+  return `$ProgressPreference = 'SilentlyContinue'
+$ErrorActionPreference = 'Stop'
+try { $p = [System.Diagnostics.Process]::GetProcessById(${row.pid}); $null = $p.Handle } catch { exit ${MEMBER_GONE} }
+try {
+  if ($p.HasExited) { exit ${MEMBER_GONE} }
+  $ms = ([DateTimeOffset]$p.StartTime).ToUnixTimeMilliseconds()
+  if ($p.ProcessName -ne '${base}' -or [Math]::Abs($ms - ${row.createdMs}) -gt 1) { exit ${MEMBER_NOT_OURS} }
+} catch { exit ${MEMBER_CHECK_FAILED} }
+taskkill.exe /F /PID ${row.pid} | Out-Null
+$code = $LASTEXITCODE
+$p.Dispose()
+exit $code`;
+}
 function killMember(row) {
   return new Promise((resolve) => {
-    const tk = spawn('taskkill', ['/F', '/PID', String(row.pid)], { stdio: 'ignore', windowsHide: true });
-    tk.on('error', (e) => resolve(`error ${e.code || e.message}`));
-    tk.on('exit', (code) => resolve(code));
+    const base = row && typeof row.name === 'string' ? row.name.replace(/\.exe$/i, '') : '';
+    if (!row || !Number.isInteger(row.pid) || row.pid <= 0 || !Number.isInteger(row.createdMs) || row.createdMs <= 0 || !/^[\w.\- ]+$/.test(base)) { resolve(MEMBER_NO_IDENTITY); return; }
+    const ps = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(memberKillScript(row, base), 'utf16le').toString('base64')], { stdio: 'ignore', windowsHide: true, env: psEnv() });
+    ps.on('error', (e) => resolve(`error ${e.code || e.message}`));
+    ps.on('exit', (code) => resolve(code));
   });
 }
 
@@ -641,7 +667,7 @@ function listsText(r) {
 
 /** Every kill, from the shell's exit: pid, start, end (ms), so a red says which process was late. */
 function killsText(r) {
-  return r.kills.map((k) => `${k.pid}${k.pid === r.shellPid ? '(shell)' : ''}: ${k.startedAt === null ? '?' : k.startedAt - r.exitAt}${k.sentAt === null ? '' : `/sent ${k.sentAt - r.exitAt}`}..${k.endedAt === null ? '?' : k.endedAt - r.exitAt}${k.code === undefined || k.code === null ? '' : ` taskkill exit ${k.code}`}`).join(', ');
+  return r.kills.map((k) => `${k.pid}${k.pid === r.shellPid ? '(shell)' : ''}: ${k.startedAt === null ? '?' : k.startedAt - r.exitAt}${k.sentAt === null ? '' : `/sent ${k.sentAt - r.exitAt}`}..${k.endedAt === null ? '?' : k.endedAt - r.exitAt}${k.code === undefined || k.code === null ? '' : ` kill exit ${k.code}`}`).join(', ');
 }
 
 /** FLAKE-LAG197-SLOW-KILL-SLOT-NOT-FREED-108: what a "not freed" red needs to name its cause. Times are ms from the shell's
@@ -712,7 +738,9 @@ async function closeWhileRunning(t, exe) {
   await new Promise((r) => setTimeout(r, 500));
   serve.stdin.write(`close ${id}\n`);
   const row = await until(() => lines.find((x) => x.event === 'watch' && x.action === 'closed'), 10_000, 'THE MEMBER WATCHER REPORTS ITS HANDLES WHEN IT ENDS (no closed line after the close)');
-  for (const line of members()) { try { spawnSync('taskkill', ['/F', '/PID', String(JSON.parse(line).pid)], { windowsHide: true }); } catch { /* gone already */ } }
+  // LAG197-MEMBER-KILL-IDENTITY-108: the watcher closed its handles at the close, so these pids are free to be reused. Each
+  // member is killed through killMember, which kills only while the pid still names the listed member.
+  await Promise.all(members().map((line) => { let row = null; try { row = JSON.parse(line); } catch { /* not a row */ } return row ? killMember(row) : null; }));
   await gone;
   return row;
 }
@@ -1076,7 +1104,7 @@ test('LIVE: a member kill never ends the process a reused pid now names (born la
   // The listed member had this pid and this name, and was born a minute before the stand-in: the pid was reused.
   const code = await killMember({ ...now, createdMs: now.createdMs - 60_000 });
   assert.equal(await answers(s), true, `A PID THAT NO LONGER NAMES THE LISTED MEMBER IS NEVER KILLED (pid ${now.pid} was reused by a stand-in, and the kill ended it: ${JSON.stringify(await s.exited)}; kill exit ${code})`);
-  assert.equal(code, 4, `the kill says it refused a pid that is not the listed member (exit ${code})`);
+  assert.equal(code, MEMBER_NOT_OURS, `the kill says it refused a pid that is not the listed member (exit ${code})`);
 });
 
 test('LIVE: a member kill never ends a process of another name on the listed pid', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
@@ -1084,7 +1112,7 @@ test('LIVE: a member kill never ends a process of another name on the listed pid
   const now = await plantedRow(s);
   const code = await killMember({ ...now, name: 'bash.exe' });
   assert.equal(await answers(s), true, `A PID THAT NO LONGER NAMES THE LISTED MEMBER IS NEVER KILLED (pid ${now.pid} is ${now.name}, the member was bash.exe, and the kill ended it: ${JSON.stringify(await s.exited)}; kill exit ${code})`);
-  assert.equal(code, 4, `the kill says it refused a pid that is not the listed member (exit ${code})`);
+  assert.equal(code, MEMBER_NOT_OURS, `the kill says it refused a pid that is not the listed member (exit ${code})`);
 });
 
 test('LIVE: a member kill still ends the listed member itself, as taskkill /F does (exit 1)', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
