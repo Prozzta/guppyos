@@ -66,6 +66,22 @@ function failedRun(e, ms) {
   return `exit code ${code}, signal ${e.signal || 'none'}, error code ${e.code || 'none'}, after ${ms} ms, stderr ${text(e.stderr)}, stdout ${text(e.stdout)}`;
 }
 
+/**
+ * Step 2 of the same card: who the run's journals say was asked to end the child. `pid` is the one Node puts
+ * on the execFileSync error (none when the child never started), `sinceMs` is taken before the spawn. The
+ * text is own-procs' own: the stops rows (handed to a stop script) and the kills rows (a run file's
+ * process.kill / taskkill) that carry the pid, or that none of N does; '' outside a run. Those two journals
+ * are all it reads: a child ended by any other path leaves no row. own-procs is loaded here, on the failure
+ * path only, so the files that load this module do not get it in their load path.
+ */
+function journalsNaming(pid, sinceMs) {
+  if (!Number.isInteger(pid)) return '';
+  try {
+    const P = require('./own-procs.cjs');
+    return `${P.stopsNaming(pid)}${P.killsNaming(pid, sinceMs)}`;
+  } catch { return ''; }
+}
+
 /** Throws, naming `from`, unless `file` is a console-subsystem Node that runs. Returns its version. */
 function assertConsoleNode(file, from, { platform = process.platform, run = execFileSync } = {}) {
   if (isElectronName(file)) throw new Error(`no console node.exe: ${from} is electron.exe (${file}), a GUI-subsystem program that a PTY does not attach`);
@@ -76,7 +92,7 @@ function assertConsoleNode(file, from, { platform = process.platform, run = exec
   let version;
   const startedMs = Date.now();
   try { version = String(run(file, ['--version'], { encoding: 'utf8', windowsHide: true, env: process.env })).trim(); } catch (e) {
-    throw new Error(`no console node.exe: ${from} (${file}) did not run --version: ${e.message} [${failedRun(e, Date.now() - startedMs)}]`);
+    throw new Error(`no console node.exe: ${from} (${file}) did not run --version: ${e.message} [pid ${Number.isInteger(e.pid) ? e.pid : 'none'}, started ${new Date(startedMs).toISOString()}, ${failedRun(e, Date.now() - startedMs)}]${journalsNaming(e.pid, startedMs)}`);
   }
   if (!/^v\d+\.\d+\.\d+/.test(version)) throw new Error(`no console node.exe: ${from} (${file}) answered --version with ${JSON.stringify(version.slice(0, 60))}`);
   return version;
