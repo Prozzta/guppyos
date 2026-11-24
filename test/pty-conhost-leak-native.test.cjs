@@ -302,6 +302,7 @@ async function unreadManager() {
         const onProcessExit = agent._$onProcessExit;
         agent._$onProcessExit = function (...args) {
           out.flowingAtExit = agent._outSocket.readableFlowing;
+          out.stoppedAtExit = agent._outSocket._handle.reading === false;
           out.readAtExit = out.read;
           return onProcessExit.apply(this, args);
         };
@@ -311,6 +312,7 @@ async function unreadManager() {
         proc.onExit(() => { out.endAtExitEvent = out.end; out.readAtExitEvent = out.read; });
         fs.writeFileSync(flag, '');
         await firstOutput;
+        out.readAtStop = out.read;
         const nap = new Int32Array(new SharedArrayBuffer(4));
         const running = () => { try { process.kill(proc.pid, 0); return true; } catch { return false; } };
         while (running()) Atomics.wait(nap, 0, 0, 50);
@@ -595,6 +597,10 @@ test('PTY-CONHOST-LEAK: node-pty alone on the bundled console host, a reader tha
     assert.ok(r.exit, `THE EXIT IS NOT REPORTED: the program is gone (the native side has its exit code: ${r.nativeExit}) and ${LISTINGS} listings later the terminal has told nobody`);
     // The premise is measured against the program's side, which the code under test cannot change.
     assert.ok(r.readAtExit < STREAM * 4097, `part of the output was still unread when the native side reported the exit (the premise of this cell): ${r.readAtExit} bytes read then, of at least ${STREAM * 4097} the program wrote`);
+    // FLAKE-CONHOST-LEAK-NATIVE-597-UNREAD-PREMISE-108: the premise stated directly. No read is issued between
+    // the first output and the native report, so what is unread then does not depend on which thread ran first.
+    assert.equal(r.stoppedAtExit, true, `no read was being issued when the native side reported the exit (the premise of this cell): ${r.stoppedAtExit}`);
+    assert.equal(r.readAtExit, r.readAtStop, `nothing was read between the first output and the native report: ${r.readAtStop} bytes at the first output, ${r.readAtExit} at the report`);
     assert.equal(r.endAtExitEvent, true, `THE END OF THE OUTPUT IS LOST: the reader never paused, the program printed ${END} last and ended itself, and the exit event came without it (${r.readAtExitEvent} bytes read of at least ${STREAM * 4097} written)`);
     assert.ok(r.readAtExitEvent >= STREAM * 4097, `all of the stream was read before the exit event: ${r.readAtExitEvent} bytes of at least ${STREAM * 4097}`);
     assert.equal(r.read, r.readAtExitEvent, `nothing comes after the exit event: ${r.readAtExitEvent} bytes then, ${r.read} in all`);
