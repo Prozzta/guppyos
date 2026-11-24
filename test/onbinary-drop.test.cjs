@@ -12,7 +12,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { childBytes, electronExe } = require('./tools/pty-child.cjs');
-const { consoleNode, peSubsystem, KEY } = require('./tools/console-node.cjs');
+const { consoleNode, assertConsoleNode, peSubsystem, KEY } = require('./tools/console-node.cjs');
 
 const X10_HIGH_COLUMN = '\x1b[M \x85!';
 
@@ -85,6 +85,47 @@ test('ONBINARY-DROP: consoleNode() rejects electron.exe and any GUI-subsystem ex
   assert.equal(peSubsystem(real.file), 3);
   assert.match(real.version, /^v\d+\.\d+\.\d+/);
   assert.doesNotMatch(path.basename(real.file), /^electron/i);
+});
+
+// FLAKE-RIG-ELECTRON-LEG-CONSOLE-NODE-VERSION-FAIL-108. A console node that was started and then ended
+// badly on `--version` was reported with Node's "Command failed: <cmd>" alone: the exit code, the signal
+// and the child's output were dropped, so a suite red could not say whether the child was killed, could
+// not set up its console, or failed by itself. The failure names all of them.
+test('FLAKE-RIG-ELECTRON-LEG-CONSOLE-NODE-VERSION-FAIL-108: a console node that fails --version is reported with its exit code, signal, stderr, stdout and elapsed time', () => {
+  const file = consoleNode().file;
+  const failing = (fields) => () => { throw Object.assign(new Error(`Command failed: ${file} --version`), fields); };
+  const message = (fields) => {
+    try { assertConsoleNode(file, 'UNIT', { run: failing(fields) }); } catch (e) { return e.message; }
+    return assert.fail('a failing --version must throw');
+  };
+  // the old text stays, so a reader (and any matcher) still finds the same start
+  const start = `no console node.exe: UNIT (${file}) did not run --version: Command failed: ${file} --version`;
+  // an exit code with nothing written: decimal and hex, since Windows status codes are read in hex
+  const quiet = message({ status: 3221225794, signal: null, stderr: '', stdout: '' });
+  assert.ok(quiet.startsWith(start), quiet);
+  assert.match(quiet, /exit code 3221225794 \(0xC0000142\)/);
+  assert.match(quiet, /signal none/);
+  assert.match(quiet, /stderr ""/);
+  assert.match(quiet, /stdout ""/);
+  assert.match(quiet, /after \d+ ms/);
+  // -1 arrives as 4294967295 or as -1: one spelling in hex
+  assert.match(message({ status: -1, signal: null, stderr: '', stdout: '' }), /exit code -1 \(0xFFFFFFFF\)/);
+  // ended by a signal, with output: the signal, and the output as written (Buffers too)
+  const killed = message({ status: null, signal: 'SIGTERM', stderr: Buffer.from('boom\r\n'), stdout: 'v1' });
+  assert.match(killed, /exit code none/);
+  assert.match(killed, /signal SIGTERM/);
+  assert.match(killed, /stderr "boom\\r\\n"/);
+  assert.match(killed, /stdout "v1"/);
+  // never started: the system error code is named, and absent fields say so instead of 'undefined'
+  const notStarted = message({ code: 'EPERM' });
+  assert.match(notStarted, /error code EPERM/);
+  assert.match(notStarted, /exit code none/);
+  assert.match(notStarted, /stderr none/);
+  assert.doesNotMatch(notStarted, /undefined/);
+  // a long output is cut, and says so
+  const long = message({ status: 1, signal: null, stderr: 'x'.repeat(5000), stdout: '' });
+  assert.ok(long.length < 2000, `the message stays readable, got ${long.length} chars`);
+  assert.match(long, /\(5000 chars, first 400\)/);
 });
 
 // ONBINARY-DROP-ELECTRON-FILE-NEVER-EXITS-108. electron.exe is a GUI-subsystem program: Windows does not
