@@ -119,6 +119,17 @@ test('after dispose() no new async read reaches the file system, and reopen() al
  * size before each ask so the cache cannot answer without a read of the file.
  */
 test('an authority read is one of the reads: the wait covers it, and after dispose() it rejects without touching the file', async (t) => {
+  // The missed-watch fallback: every 2 s the hive stats its cached authority files and re-reads a
+  // changed one, on its own timer, outside any call this test awaits. This handle lets the test
+  // stop new ticks and wait for one already running (see the control below). Until it is stopped,
+  // every tick runs the real method.
+  const proto = HiveManager.prototype, realFallback = proto.revalidateAuthoritiesAsync;
+  assert.equal(typeof realFallback, 'function', 'the missed-watch fallback is still HiveManager.revalidateAuthoritiesAsync');
+  const fallback = { stopped: false, flying: Promise.resolve() };
+  proto.revalidateAuthoritiesAsync = function () {
+    return fallback.stopped ? Promise.resolve() : (fallback.flying = realFallback.call(this));
+  };
+  t.after(() => { proto.revalidateAuthoritiesAsync = realFallback; });
   const w = await world(t);
   const tasks = path.join(w.hive.root(), 'tasks.json');
   const real = fs.promises.readFile;   // world()'s gate: every other path passes through it
@@ -144,7 +155,13 @@ test('an authority read is one of the reads: the wait covers it, and after dispo
   // own, outside any call this test awaits. Left alone, such a read can be the one that reaches
   // the gate below, and dispose() then refuses the read this test is about. So: drop the
   // watchers (no new refresh), wait for a refresh already in flight, then for every counted read.
+  // The missed-watch fallback is the same kind of read on a 2 s timer: the rewrite below changes
+  // the file's key, so a tick that lands before the integrity read reaches the gate would re-read
+  // tasks.json and reach the gate first. So no new tick from here on, and a tick already running
+  // is awaited to its end (it awaits the refresh it starts).
+  fallback.stopped = true;
   w.hive.__dropAuthorityWatchersForTests();
+  await fallback.flying;
   await Promise.all([...w.hive.authorityRefreshes.values()]);
   await w.hive.drainReads();
   assert.equal(g.open, 0, 'control: no authority read is left open');
