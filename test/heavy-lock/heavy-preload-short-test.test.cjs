@@ -36,7 +36,18 @@ const HJF = 'src/main/heavyJob.ts';
 const HJ = loadTs(HJF);
 const { HookServer } = loadTs('src/main/hooks.ts');
 const PRELOAD = path.join(REPO, 'resources', 'heavy-preload.cjs');
-const NPM_CLI = path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
+// ELECTRON-LEG-HARNESS-ENV-108: the npm of a real Node install, found beside consoleNode(). On the
+// Electron leg process.execPath is electron.exe, which ships no npm, so the parser read no command
+// list. The helper still runs under process.execPath (the runtime under test); only npm's files move.
+// No npm there fails by name: never a skip.
+let npmCli = null;
+function NPM_CLI() {
+  if (npmCli) return npmCli;
+  const node = require('../tools/console-node.cjs').consoleNode().file;
+  const cli = path.join(path.dirname(node), 'node_modules', 'npm', 'bin', 'npm-cli.js');
+  if (!fs.existsSync(cli)) throw new Error(`no npm-cli.js beside the console Node ${node}: looked for ${cli}`);
+  return (npmCli = cli);
+}
 const H = { heavy: true, kind: 'suite' };
 const C0 = 1_000_000 - 5_000;
 
@@ -208,7 +219,7 @@ function start(args, url) {
 }
 
 function npmKind(args, preload = PRELOAD) {
-  const r = spawnSync(process.execPath, [preload, '--guppy-heavy-npm-command', NPM_CLI, ...args], { encoding: 'utf8', windowsHide: true });
+  const r = spawnSync(process.execPath, [preload, '--guppy-heavy-npm-command', NPM_CLI(), ...args], { encoding: 'utf8', windowsHide: true });
   assert.equal(r.status, 0, `npm parser helper exits cleanly: ${r.stderr}`);
   return JSON.parse(r.stdout).preloadKind;
 }

@@ -301,7 +301,10 @@ test('PIN: no process.kill of a recorded or listed pid in the fixed files (proce
 
 test('own-procs, real (win32): kills a tree of TWO children it started, and not one recorded with a LATER-reused birth', { timeout: 60_000, skip: process.platform !== 'win32' && 'win32 only' }, async () => {
   const { spawn } = require('node:child_process');
-  const start = () => { const c = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true }); return { c, rec: { pid: c.pid, bornMs: Date.now(), name: 'node.exe' }, exit: new Promise((r) => c.once('exit', r)) }; };
+  // ELECTRON-LEG-HARNESS-ENV-108: the recorded name is the image actually spawned (electron.exe on the
+  // Electron leg, where a hard-coded node.exe made every row a stranger and stillOurs null).
+  const IMAGE = path.basename(process.execPath);
+  const start = () => { const c = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true }); return { c, rec: { pid: c.pid, bornMs: Date.now(), name: IMAGE }, exit: new Promise((r) => c.once('exit', r)) }; };
   const a = start(), b = start(), keep = start();
   try {
     await new Promise((r) => setTimeout(r, 500));
