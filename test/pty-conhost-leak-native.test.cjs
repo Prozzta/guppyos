@@ -294,16 +294,18 @@ async function unreadManager() {
       out.programAlive = alive();
     } else {
       if (FLOWING) {
-        // Nobody pauses this output, ever. This thread takes nothing from the first output until
-        // the program is gone, so part of what it printed is still on its way when the native side
-        // reports the exit. What was read by then, and whether END had come when the terminal's
-        // exit event was sent, is the result.
+        // Nobody pauses this output, ever. Nothing is read from the first output until the native
+        // side reports the exit, so part of what the program printed is still on its way then.
+        // What was read by then, and whether END had come when the terminal's exit event was sent,
+        // is the result.
         const agent = proc._agent;
         const onProcessExit = agent._$onProcessExit;
+        let readOn = () => {};
         agent._$onProcessExit = function (...args) {
           out.flowingAtExit = agent._outSocket.readableFlowing;
           out.stoppedAtExit = agent._outSocket._handle.reading === false;
           out.readAtExit = out.read;
+          readOn();
           return onProcessExit.apply(this, args);
         };
         let tail = '';
@@ -312,10 +314,19 @@ async function unreadManager() {
         proc.onExit(() => { out.endAtExitEvent = out.end; out.readAtExitEvent = out.read; });
         fs.writeFileSync(flag, '');
         await firstOutput;
+        // FLAKE-CONHOST-LEAK-NATIVE-597-UNREAD-PREMISE-108: from here no read is issued until the native
+        // report itself (readOn, in the hook above), so what is unread at the report does not depend
+        // on which thread ran first. The stream is NOT paused: readableFlowing stays true and no
+        // 'pause' is emitted, so node-pty's exit path sees a flowing output. The stream's own _read
+        // is held too: in flowing mode it would start the handle again on the next tick.
+        const sock = agent._outSocket;
+        const handle = sock._handle;
+        const read = sock._read;
+        sock._read = () => {};
+        handle.reading = false;
+        handle.readStop();
         out.readAtStop = out.read;
-        const nap = new Int32Array(new SharedArrayBuffer(4));
-        const running = () => { try { process.kill(proc.pid, 0); return true; } catch { return false; } };
-        while (running()) Atomics.wait(nap, 0, 0, 50);
+        readOn = () => { sock._read = read; handle.reading = true; handle.readStart(); };
       } else if (LATE_PAUSE) {
         // The output is read while the program prints. The pause is made in the same turn as the
         // native exit report, right after node-pty's own exit path has run: by then that path has
