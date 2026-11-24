@@ -38,6 +38,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { consoleNode } = require('./tools/console-node.cjs');
 
 const CAP_MS = 8000;
 /** PTY-EARLY-CLOSE-EOF-READY-WAIT-108: a conout worker that is slow to start, as in a loaded suite leg.
@@ -107,7 +108,8 @@ if (process.platform !== 'win32') {
 
   async function spawnSilent() {
     const id = `eof-${++seq}`;
-    const r = await m.spawn({ id, cwd: JAIL, command: process.execPath, args: [ROOT], cols: 80, rows: 24, env: {} }, owner);
+    // ELECTRON-LEG-HARNESS-ENV-108: a console Node, as on the Node leg (electron.exe is never attached).
+    const r = await m.spawn({ id, cwd: JAIL, command: consoleNode().file, args: [ROOT], cols: 80, rows: 24, env: {} }, owner);
     assert.equal(r.ok, true, `spawn: ${r.error}`);
     const proc = m.sessions.get(id).proc;
     const hold = holdRoot(proc.pid, 'win32', rootHandoff(proc));

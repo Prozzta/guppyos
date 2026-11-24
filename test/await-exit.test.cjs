@@ -104,7 +104,9 @@ test('awaitRowsExit, real PowerShell: an exited row resolves, a running one reje
     a.c.kill();
     await a.exited;
     // the LAST row is the gone one: PowerShell's own exit code must not fail the wait
-    await assert.rejects(awaitRowsExit([b.row, a.row], { capMs: 300 }), (e) => new RegExp(`after the kill: ${b.row.pid} node\\.exe$`).test(e.message));
+    // ELECTRON-LEG-HARNESS-ENV-108: the named image is the one spawned (electron.exe on the Electron leg).
+    const image = require('node:path').basename(process.execPath).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    await assert.rejects(awaitRowsExit([b.row, a.row], { capMs: 300 }), (e) => new RegExp(`after the kill: ${b.row.pid} ${image}$`).test(e.message));
     assert.deepEqual(await awaitRowsExit([a.row], { capMs: 300 }), [a.row]);
   } finally { a.c.kill(); b.c.kill(); await b.exited; }
 });

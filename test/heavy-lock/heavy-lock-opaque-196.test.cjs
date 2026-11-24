@@ -399,7 +399,12 @@ K.e2eNoop = async (t, M = HJ, preload = PRELOAD) => {
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   t.after(() => srv.close());
   const url = `http://127.0.0.1:${srv.address().port}/ledger/a/${'0'.repeat(32)}`;
-  for (const args of [[process.execPath, '-e', 'process.exit(0)'], [process.execPath, 'wrapper.cjs', '--no-test-here']]) {
+  // ELECTRON-LEG-HARNESS-ENV-108: the non-test processes are a plain Node. The preload deliberately
+  // leaves an Electron process before its spawn guard (heavy-preload.cjs: guard = hive &&
+  // !process.versions.electron), so with electron.exe (process.execPath on the Electron leg) these
+  // never reached the return this guarantee is about, and "preload: no fast path" lived.
+  const node = require('../tools/console-node.cjs').consoleNode().file;
+  for (const args of [[node, '-e', 'process.exit(0)'], [node, 'wrapper.cjs', '--no-test-here']]) {
     if (args[1] === 'wrapper.cjs') continue;
     const r = await start(args, { url, preload }).done;
     assert.equal(r.code, 0, r.stderr);

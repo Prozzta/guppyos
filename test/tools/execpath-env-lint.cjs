@@ -28,9 +28,18 @@
  *  - a same-file helper called with one of those as an argument (the parameter used directly as a
  *    command, or inside a command string), or with an array literal whose first element is one
  *    (the parameter's [0] used as a command).
+ *  - ELECTRON-LEG-HARNESS-ENV-108: every PTY command, an object property `command:` whose value is
+ *    process.execPath or an alias (PtyManager.spawn({ command: process.execPath, ... })); a `command:`
+ *    STRING built with it (a hook's shell command line, a saved restore recipe) is a command line a
+ *    shell or the app parses, not a PTY file, and is not this rule's. The env does NOT make it
+ *    safe, not even one that keeps the key: electron.exe is a GUI-subsystem program, and Windows
+ *    never attaches one to a pseudoconsole, also when it runs as Node, so the child's output never
+ *    reaches the terminal (pty-closetree-pidreuse timed out on its root's first output; its env {}
+ *    did not even carry the key). The command must be a console Node: consoleNode().file.
  * Files are read when they mention execPath or fork( at all (an alias need not spell process.execPath).
- * Not covered (and why safe): PtyManager spawns (command: process.execPath) go through buildPtyEnv,
- * which keeps the key (pinned in test/execpath-env-guard.test.cjs). Intentional electron.exe
+ * Not covered: a PTY command handed in from another file; a shorthand `{ command }` (the local
+ * named command holding process.execPath); a same-file helper whose parameter is used as
+ * `command:` and that a caller feeds process.execPath (Jim NIT 2). Intentional electron.exe
  * launches spawn the electron binary by path, never process.execPath, so they are not matched.
  * Cross-file helpers (an imported function fed process.execPath) are not followed.
  */
@@ -391,6 +400,12 @@ function analyzeSource(text, file = 'x.cjs') {
   };
   const launches = (call, name) => (name === 'fork' ? true : EXEC.has(name) ? containsExec(call.arguments[0]) : cmdIsExec(call.arguments[0]));
   all(sf, (n) => {
+    // ELECTRON-LEG-HARNESS-ENV-108: a PTY command ({ command: process.execPath } or an alias, as
+    // PtyManager.spawn takes it). Whatever its env, that is electron.exe on the Electron leg.
+    if (ts.isPropertyAssignment(n) && propKey(n) === 'command' && isExec(n.initializer) && ts.isObjectLiteralExpression(n.parent)) {
+      report(n, `PTY command ${txt(n.initializer, 40)} is electron.exe on the Electron leg, a GUI-subsystem program a pseudoconsole never attaches: use consoleNode().file (tools/console-node.cjs)`);
+      return;
+    }
     if (!ts.isCallExpression(n)) return;
     const name = calleeName(n.expression);
     if (isSpawnName(name)) { if (launches(n, name)) { const r = checkOpts(n, name); if (r) report(n, r); } return; }
