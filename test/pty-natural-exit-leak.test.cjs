@@ -184,10 +184,25 @@ test('PTY-NATURAL-EXIT-JOIN: GUARD: an output close while the root still runs is
   const node = consoleNode();
   const m = new PtyManager();
   const terminals = [];
+  // FLAKE-PTY-NATURAL-EXIT-GUARD-KILL-ESRCH-108: once the output close is reported, PtyManager's
+  // exit handler destroys the input socket (releaseExited), so both of the console host's pipes are
+  // gone and the host ends the root by itself, at a time of its own. A liveness check made by the
+  // test after the close, and a kill by the root's pid, both race that end (the kill threw ESRCH
+  // right after a check that passed). So the root's liveness is taken where it decides the guard:
+  // the patch's own signal-0 probe at the close. The child is ended by its pseudoconsole handle,
+  // which names no pid and is safe when the host is already ending it.
+  const realKill = process.kill;
+  const probes = [];
+  let innerPid = null;
   try {
     const x = await open(m, node, "console.log('READY-GUARD'); setInterval(() => {}, 1000)");
     terminals.push(x);
     const agent = x.proc._agent;
+    innerPid = agent._innerPid;
+    process.kill = function (...args) {
+      if (Number(args[0]) !== innerPid || (args[1] !== 0 && args[1] !== '0')) return realKill.apply(process, args);
+      try { const r = realKill.apply(process, args); probes.push('alive'); return r; } catch (e) { probes.push(e && e.code); throw e; }
+    };
     const exits = [];
     x.proc.onExit((e) => exits.push(e.exitCode));
     let reported = false;
@@ -202,11 +217,13 @@ test('PTY-NATURAL-EXIT-JOIN: GUARD: an output close while the root still runs is
     assert.deepEqual(exits, [undefined], 'THE CLOSE OF A LIVE ROOT IS REPORTED AT ONCE: nothing proves that a report is coming');
     assert.equal(reported, false, 'no report has run');
     assert.equal(agent._guppyPendingExit, undefined, 'nothing is left for a report');
-    assert.doesNotThrow(() => process.kill(agent._innerPid, 0), 'the root still runs');
-    process.kill(agent._innerPid);   // this test's own child
+    assert.deepEqual(probes, ['alive'], 'THE ROOT STILL RAN AT THE CLOSE: the close asked once, by signal 0, and the root answered');
+    process.kill = realKill;
+    agent._ptyNative.kill(agent._pty, agent._useConptyDll);   // this test's own child, by its pseudoconsole handle: no pid
     await within(reportRan, 'the exit report after the end of the child');
     assert.deepEqual(exits, [undefined], 'the report emits no second exit');
   } finally {
+    process.kill = realKill;
     await freeAll(terminals);
   }
 });
