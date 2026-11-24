@@ -297,6 +297,25 @@ test('the wait for the gated log open is not a turn count: a folder listing slow
   assert.ok((await tailing).length > 0, 'control: the held tail still returns rows');
 });
 
+/**
+ * The other half of started(): a read that settles without ever reaching its gate did not start,
+ * and the wait must say so. A started() that took the read settling as "started" would pass every
+ * cell above whose read reaches the gate, and would wave through the one that never does.
+ * MUTANT: in started(), `never` resolving without the assert (op.then(resolve, resolve)) turns
+ * this cell red at "a read that settled without reaching its gate passed as started".
+ */
+test('a wait whose read settles without reaching the gate fails as "the gated read never started"', async (t) => {
+  const w = await world(t);
+  const g = gateLogOpen(t, w.hive);
+  g.gated = true;
+  w.hive.dispose();
+  const tailing = w.hive.logTailAsync(5);
+  await assert.rejects(started(g, () => g.open === 1, tailing), /the gated read never started/,
+    'a read that settled without reaching its gate passed as started');
+  assert.deepEqual(await tailing, [], 'control: a disposed manager has no log to show');
+  assert.equal(g.calls, 0, 'control: the read settled without reaching the gate');
+});
+
 test('reset and home change wait for the open reads between dispose() and touching the folder', () => {
   const src = codeOnly(readSource('src/main/index.ts'), 'index.ts');
   const order = (label, from, marks) => {
