@@ -14,11 +14,12 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
-const { spawn } = require('node:child_process');
+const { spawn, execFile } = require('node:child_process');
 const { nodeEnv } = require('../tools/node-env.cjs');
 const { createSandbox, removeSandbox } = require('../electron-harness/run.cjs');
 const { rigEnv } = require('./isolation.cjs');
 const own = require('../tools/own-procs.cjs');
+const { psEnv } = require('../tools/ps-env.cjs');
 
 const HOST = path.join(__dirname, 'rig-host.cjs');
 const BAD_ENV = /^(HIVE_|AGENT_|MEMORY_|MUNDER_|CTH_|KG_|MD_SLACK_|CLAUDE)/i;
@@ -52,6 +53,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const SLOW_STUB_MS = Number(process.env.RIG_SLOW_STUB_MS || 0);
 const slowed = (s) => (SLOW_STUB_MS > 0 ? { ...s, scenario: { ...(s.scenario || {}), slowStubMs: SLOW_STUB_MS } } : s);
 
+/** F3-RIGHOST: on a -1 exit only, the Application event log's last 60 s for electron.exe or the host pid (WER, loader,
+ *  AV). Best effort: never throws, bounded by its own 15 s timeout (killSignal ends the one pid; Get-WinEvent starts no
+ *  children), windowsHide, and awaited before the reject so no process outlives it. Not Windows: an empty string. */
+function applicationEventLog(pid) {
+  if (process.platform !== 'win32') return Promise.resolve('');
+  const cmd = `Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddSeconds(-60)} -ErrorAction SilentlyContinue | Where-Object { $_.Message -like '*electron.exe*' -or $_.Message -like '*${pid}*' } | Select-Object -First 5 | ForEach-Object { $m = $_.Message.Replace([string][char]13, ' ').Replace([string][char]10, ' '); if ($m.Length -gt 300) { $m = $m.Substring(0, 300) }; '{0} id={1} {2}: {3}' -f $_.TimeCreated.ToString('o'), $_.Id, $_.ProviderName, $m }`;
+  return new Promise((resolve) => {
+    try {
+      execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', cmd], { env: psEnv(), windowsHide: true, timeout: 15_000, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 }, (err, stdout) => {
+        const t = String(stdout || '').trim();
+        resolve(t ? 'application event log, last 60 s:\n' + t : 'application event log, last 60 s: nothing for electron.exe or this pid' + (err ? ' (' + String(err.message).split('\n')[0] + ')' : ''));
+      });
+    } catch (e) { resolve('application event log: not read (' + String(e.message).split('\n')[0] + ')'); }
+  });
+}
 function pidAlive(pid) { try { process.kill(pid, 0); return true; } catch { return false; } }
 /** Kill a process the rig started, with its tree. `rec` = { pid, bornMs }. TEST-GLOB-PID-RECYCLE: on win32 only
  *  while the pid is still that process (birth within own-procs' slack) and only its own tree (each child
@@ -91,18 +107,31 @@ class Rig {
     this.hostRecs.push(child.rec);
     this.exited = new Promise((r) => child.on('exit', (code, sig) => r({ code, sig })));
     const ready = await new Promise((resolve, reject) => {
-      let out = '';
+      let out = '', outBytes = 0, errBytes = 0, exitInfo = null, isReady = false;
       const timer = setTimeout(() => reject(new Error(`rig host did not start in ${timeoutMs} ms\n${out}\n${this.log}`)), timeoutMs);
       child.stdout.setEncoding('utf8');
       child.stderr.setEncoding('utf8');
-      child.stderr.on('data', (d) => { this.log = (this.log + d).slice(-20_000); });
+      child.stderr.on('data', (d) => { errBytes += d.length; this.log = (this.log + d).slice(-20_000); });
       child.stdout.on('data', (d) => {
+        outBytes += d.length;
         out += d;
         this.log = (this.log + d).slice(-20_000);
         const at = out.indexOf('__RIG_READY__');
-        if (at >= 0 && out.indexOf('\n', at) > 0) { clearTimeout(timer); resolve(JSON.parse(out.slice(at + 13, out.indexOf('\n', at)))); }
+        if (at >= 0 && out.indexOf('\n', at) > 0) { isReady = true; clearTimeout(timer); resolve(JSON.parse(out.slice(at + 13, out.indexOf('\n', at)))); }
       });
-      child.on('exit', (code) => { clearTimeout(timer); reject(new Error(`rig host exited (${code}) before it was ready\n${this.log}`)); });
+      // FLAKE-MAILRIG-F3-RIGHOST-STARTUP-EXIT-108: the code and signal are taken at 'exit', but the message is built at
+      // 'close', once both pipes have ended: 'exit' can fire before the last stderr/stdout data arrives, so an empty
+      // log at 'exit' does not prove the host wrote nothing. The 45 s timer stays armed until then (no new bound).
+      child.on('exit', (code, sig) => { exitInfo = { code, sig, atMs: Date.now() - child.rec.bornMs }; });
+      child.on('close', async (code, sig) => {
+        if (isReady) return;
+        const x = exitInfo || { code, sig, atMs: Date.now() - child.rec.bornMs };
+        const others = this.hostRecs.filter((r) => r !== child.rec && pidAlive(r.pid)).length;
+        const diag = `rig host diag: signal=${x.sig} exit ${x.atMs} ms after spawn, pid ${child.pid}, stdout ${outBytes} B, stderr ${errBytes} B, execPath ${process.execPath}, free ${Math.round(os.freemem() / 1048576)}/${Math.round(os.totalmem() / 1048576)} MB, uptime ${Math.round(os.uptime())} s, other hosts with pid alive (may be reused) ${others}`;
+        const ev = (x.code === 4294967295 || x.code === -1) ? await applicationEventLog(child.pid) : '';
+        clearTimeout(timer);
+        reject(new Error(`rig host exited (${x.code}) before it was ready\n${diag}${ev ? '\n' + ev : ''}\n${this.log}`));
+      });
     });
     this.port = ready.port;
     this.info = ready;

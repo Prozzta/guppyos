@@ -29,6 +29,9 @@
  * sandbox (the pipe name hashes that root, so it is not the live floor's), OPENAI/ANTHROPIC base URLs
  * point at the rig's own fake LLM. No window of any kind is created: this process loads no Electron.
  */
+// F3-RIGHOST: the first statement, on STDERR only (the driver's ready parser scans stdout): an empty host log then means this
+// line was never written, i.e. the process died before JS; with it, the log names how far the host got.
+process.stderr.write(`__RIG_BOOT__ pid=${process.pid} node=${process.version} electron=${process.versions.electron || 'no'}\n`);
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
