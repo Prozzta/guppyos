@@ -19,8 +19,12 @@ require('./tools/own-job.cjs');
  *     fork (it always runs process.execPath unless its execPath option says otherwise), and a
  *     scan that does not skip files lacking the literal 'process.execPath'.
  *  3. nodeEnv adds the key only under Electron, and always returns a copy.
- *  4. PtyManager spawns (command: process.execPath, env {}) are safe because buildPtyEnv keeps the
- *     key from the parent: pinned here so a strip there cannot reopen the hole unseen.
+ *  4. ELECTRON-LEG-HARNESS-ENV-108: a PTY command (command: process.execPath, or an alias) is now a
+ *     finding whatever its env. buildPtyEnv does keep the key from the parent (still pinned here, so
+ *     a strip there cannot reopen the GUI-app hole unseen), but under the Electron leg the command is
+ *     electron.exe, a GUI-subsystem program a pseudoconsole never attaches, so env {} no longer makes
+ *     it safe: a PTY root is consoleNode().file (tools/console-node.cjs). A command STRING is not
+ *     this rule's (its own subtest pins that).
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -281,7 +285,23 @@ test('nodeEnv: the key only under Electron, and always a copy', () => {
   assert.equal(nodeEnv({})[KEY], process.versions.electron ? '1' : undefined, 'this runtime');
 });
 
-test('PtyManager path: buildPtyEnv keeps ELECTRON_RUN_AS_NODE from the parent (env {} is safe)', () => {
+test('PTY command (ELECTRON-LEG-HARNESS-ENV-108): process.execPath as a PtyManager command is a finding, even with env {}', () => {
+  const direct = lint("function f(m) { return m.spawn({ id: 'a', command: process.execPath, args: ['r.js'], env: {} }); }");
+  assert.equal(direct.length, 1, `the direct form is one finding: ${JSON.stringify(direct)}`);
+  assert.match(direct[0].why, /PTY command/, 'named as the PTY rule');
+});
+
+test('PTY command (ELECTRON-LEG-HARNESS-ENV-108): an alias of process.execPath as the command is a finding', () => {
+  const alias = lint("const NODE = process.execPath; function f(m) { return m.spawn({ id: 'a', command: NODE, args: [], env: {} }); }");
+  assert.ok(alias.some((f) => /PTY command/.test(f.why)), `the alias form is flagged: ${JSON.stringify(alias)}`);
+});
+
+test('PTY command (ELECTRON-LEG-HARNESS-ENV-108): a command STRING and a console Node command are not this rule\'s', () => {
+  assert.deepEqual(lint("const hook = { command: `\"${process.execPath}\" hook.cjs` };"), [], 'a command string (a hook recipe) is not a spawn of process.execPath');
+  assert.deepEqual(lint("const { consoleNode } = require('./tools/console-node.cjs'); function f(m) { return m.spawn({ id: 'a', command: consoleNode().file, env: {} }); }"), [], 'consoleNode().file is the fix');
+});
+
+test('PtyManager path: buildPtyEnv keeps ELECTRON_RUN_AS_NODE from the parent (no GUI app from a PTY env)', () => {
   const { buildPtyEnv } = loadTs(path.join(REPO, 'src/main/ptyEnv.ts'));
   const env = buildPtyEnv({ PATH: 'C:\\x', SystemRoot: 'C:\\Windows', [KEY]: '1' }, 'C:\\x', {}, 'win32');
   assert.equal(env[KEY], '1', 'a strip here would make every PtyManager spawn of process.execPath an Electron app under the Electron leg');

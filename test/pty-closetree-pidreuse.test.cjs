@@ -29,6 +29,7 @@ const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 const { readSource } = require('./read-source.cjs');
 const { tempDir } = require('./tools/test-temp.cjs');
+const { consoleNode } = require('./tools/console-node.cjs');
 
 if (process.platform !== 'win32') {
   require('./tools/inert.cjs').announceInert('PTY-CLOSETREE-PIDREUSE', 'the pid-named tree sweep (taskkill) and the ConPTY exit report are Windows only');
@@ -40,6 +41,10 @@ const REAL = loadTs(PTYF);
 const { holdRoot, rootHandoff } = loadTs('src/main/procIdentity.ts');
 const { awaitHeldExit } = require('./tools/await-exit.cjs');
 const DIR = tempDir('ptpr-');
+// ELECTRON-LEG-HARNESS-ENV-108: the root must be ON the pseudoconsole, so it is a console-subsystem
+// Node. Under the Electron leg process.execPath is electron.exe: a GUI-subsystem program (and, with
+// env {}, not even run as Node) that Windows never attaches, so its first output never came.
+const ROOT_NODE = consoleNode().file;
 fs.writeFileSync(path.join(DIR, 'root.js'), "process.stdout.write('ptpr-root-up'); setInterval(() => {}, 1000);\n");
 
 // Every taskkill is answered here. `answers` is consumed one per sweep; with none left the sweep
@@ -97,7 +102,7 @@ async function withTerminal(Pty, scenario) {
   let closes = 0;
   let root = 0;
   try {
-    const r = await m.spawn({ id, cwd: DIR, command: process.execPath, args: [path.join(DIR, 'root.js')], cols: 80, rows: 24, env: {} }, owner);
+    const r = await m.spawn({ id, cwd: DIR, command: ROOT_NODE, args: [path.join(DIR, 'root.js')], cols: 80, rows: 24, env: {} }, owner);
     assert.ok(r.ok, `spawn: ${r.error}`);
     const proc = m.sessions.get(id).proc;
     root = proc.pid;

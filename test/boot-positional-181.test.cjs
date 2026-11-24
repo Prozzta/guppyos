@@ -90,7 +90,10 @@ test('Windows: an agent CLI under a folder with a space (Program Files) is quote
   const { tempDir } = require('./tools/test-temp.cjs');
   const exe = path.join(tempDir('pty spaced '), 'Program Files', 'nodejs', 'node.exe');
   fs.mkdirSync(path.dirname(exe), { recursive: true });
-  try { fs.linkSync(process.execPath, exe); } catch { fs.copyFileSync(process.execPath, exe); }
+  // ELECTRON-LEG-HARNESS-ENV-108: a lone node.exe runs from any folder; electron.exe (process.execPath
+  // on the Electron leg) does not, without its dlls and icudtl.dat beside it (it exited 0x80000003).
+  const node = require('./tools/console-node.cjs').consoleNode().file;
+  try { fs.linkSync(node, exe); } catch { fs.copyFileSync(node, exe); }
   assert.ok(/ /.test(exe));
   const args = GO.withGodOrientationArg(BASE, true).args;
   assert.deepEqual(K.ptyLineArgv(exe, args), args);
