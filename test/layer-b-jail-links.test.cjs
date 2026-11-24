@@ -18,9 +18,27 @@ const { primaryLayerBSource } = require('./tools/layer-b-sources.cjs');
 const lb = require('./tools/layer-b-run.cjs');
 const src = primaryLayerBSource().raw;
 
+/** ELECTRON-LEG-HARNESS-ENV-108: remove a junction/symlink as a LINK, never through it. Under the
+ *  Electron leg fs.rmSync on a junction fails (EISDIR) and a recursive rmSync deletes through it. */
+function removeLink(p) {
+  if (process.platform === 'win32') fs.rmdirSync(p); else fs.unlinkSync(p);
+}
+/** Every link under `d` removed link-only (the walk never enters one), deepest first. */
+function removeLinksUnder(d) {
+  let names;
+  try { names = fs.readdirSync(d); } catch (e) { if (e.code === 'ENOENT') return; throw e; }
+  for (const n of names) {
+    const p = path.join(d, n);
+    const st = fs.lstatSync(p);
+    if (st.isSymbolicLink()) removeLink(p);
+    else if (st.isDirectory()) removeLinksUnder(p);
+  }
+}
 function tmp(t, prefix) {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-  t.after(() => fs.rmSync(d, { recursive: true, force: true }));
+  // The links go first: the recursive delete then holds no link to walk through (every target is
+  // inside d today, but the delete must not depend on that).
+  t.after(() => { removeLinksUnder(d); fs.rmSync(d, { recursive: true, force: true }); });
   return d;
 }
 function junction(t, target, link) {
@@ -70,7 +88,7 @@ test('(a) a DANGLING junction, a link reached through the base\'s own real path,
   if (!junction(t, gone, path.join(j.base, 'd', 'dangling'))) return;
   fs.rmSync(gone, { recursive: true });
   assert.match(lb.jailLinkScan(j.base).problems.join(' '), /does not resolve/);
-  fs.rmSync(path.join(j.base, 'd', 'dangling'));
+  removeLink(path.join(j.base, 'd', 'dangling'));
   // A base that is itself a junction: links are judged against the base's REAL path.
   const real = path.join(j.root, 'realbase');
   fs.mkdirSync(path.join(real, 'x'), { recursive: true });
@@ -151,7 +169,7 @@ test('(b) the real ~/.codex/packages listing: unchanged passes, missing both tim
   fs.mkdirSync(a); fs.mkdirSync(b);
   if (!junction(t, a, path.join(pk, 'current'))) return;
   w.start();
-  fs.rmSync(path.join(pk, 'current'));
+  removeLink(path.join(pk, 'current'));
   fs.symlinkSync(b, path.join(pk, 'current'), 'junction');
   const st2 = fs.lstatSync(path.join(pk, 'current'));
   void st2;
