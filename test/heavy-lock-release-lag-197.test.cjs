@@ -27,6 +27,7 @@ const { removeDir } = require('./tools/test-temp.cjs');
 const { spawn, spawnSync } = require('node:child_process');
 const loadTs = require('./load-ts.cjs');
 const { gitBash, findGitBash, candidates } = require('./tools/git-bash.cjs');
+const own = require('./tools/own-procs.cjs');
 
 const root = path.join(__dirname, '..');
 const CPU_FILE = 'src/main/heavyCpu.ts';
@@ -522,7 +523,7 @@ async function liveRelease(t, o) {
   let shellGone = false;
   sh.on('exit', () => { shellGone = true; });
   const listOnce = () => new Promise((resolve) => {
-    const rec = { at: Date.now(), ms: null, error: null, code: null, bytes: 0, rows: 0, unparsed: 0, pids: [] };
+    const rec = { at: Date.now(), ms: null, error: null, code: null, bytes: 0, rows: 0, unparsed: 0, pids: [], members: [] };   // members: the rows (pid, name, createdMs) as the job tool read them
     lists.push(rec);
     let out = '';
     const l = spawn(exe, ['list', id], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
@@ -531,7 +532,7 @@ async function liveRelease(t, o) {
     l.on('close', (code) => {
       rec.ms = Date.now() - rec.at; rec.code = code; rec.bytes = out.length;
       for (const line of out.split(/\r?\n/).filter(Boolean)) {
-        try { rec.pids.push(JSON.parse(line).pid); rec.rows++; } catch { rec.unparsed++; }
+        try { const m = JSON.parse(line); rec.pids.push(m.pid); rec.members.push(m); rec.rows++; } catch { rec.unparsed++; }
       }
       resolve(rec);
     });
@@ -546,20 +547,19 @@ async function liveRelease(t, o) {
       let round = 0;
       for (;;) {
         round += 1;
-        const fresh = rec.pids.filter((p) => !seen.has(p));
+        const fresh = rec.members.filter((m) => !seen.has(m.pid));
         if (!fresh.length) break;
         const ended = [];
-        for (const pid of fresh) {
+        for (const row of fresh) {
+          const pid = row.pid;
           seen.add(pid);
-          const k = { pid, round, startedAt: null, sentAt: null, endedAt: null, code: null };   // code: the taskkill tool's own exit code (diagnostic only)
+          const k = { pid, round, startedAt: null, sentAt: null, endedAt: null, code: null };   // code: killMember's own exit code (diagnostic only)
           kills.push(k);
           ended.push(new Promise((done) => {
             const end = () => { if (k.endedAt === null) k.endedAt = Date.now(); done(); };
             const go = () => {
               k.sentAt = Date.now();
-              const tk = spawn('taskkill', ['/F', '/PID', String(pid)], { stdio: 'ignore', windowsHide: true });
-              tk.on('error', (e) => { if (k.code === null) k.code = `error ${e.code || e.message}`; end(); });
-              tk.on('exit', (code) => { if (k.code === null) k.code = code; end(); });
+              killMember(row).then((code) => { if (k.code === null) k.code = code; end(); });
             };
             // One kill, from its start to the tool's exit. o.slowKill: the kill tool takes this long
             // per process, as taskkill does on a loaded machine.
@@ -610,6 +610,16 @@ async function liveRelease(t, o) {
   let stillIn = null;
   if (!rel || !memberEnded) { stillIn = await listOnce(); lists.pop(); }
   return { member, helperTrace, stillIn, lagMs: rel ? rel.ts - exitAt : null, relAt: rel ? rel.ts : null, lastSentAt: lastSent.at, lastSentPid: lastSent.pid, afterEndMs: rel ? rel.ts - jobEndAt : null, exitAt, jobEndAt, runMs: exitAt - t0, heldMs: rel ? rel.heldMs : null, reason: rel ? rel.reason : null, rows, shellAliveAtRelease, code: exit.code, signal: exit.signal, kills, shellPid: sh.pid, lists, t0 };
+}
+
+/** LAG197-MEMBER-KILL-IDENTITY-108: ends one member the job tool listed (a row { pid, name, createdMs }). Resolves with
+ *  the kill tool's exit code, or `error <code>` when it could not start; never rejects. */
+function killMember(row) {
+  return new Promise((resolve) => {
+    const tk = spawn('taskkill', ['/F', '/PID', String(row.pid)], { stdio: 'ignore', windowsHide: true });
+    tk.on('error', (e) => resolve(`error ${e.code || e.message}`));
+    tk.on('exit', (code) => resolve(code));
+  });
 }
 
 // What this process reads from a Git Bash shell that taskkill /F ended: exit code 1, no signal.
@@ -1036,6 +1046,54 @@ test('LIVE: a job still running keeps the slot (a sequential command after the f
   const r = await liveRelease(t, { body: 'node -e "setTimeout(()=>{},300)"; sleep 2; exit 0' });
   assert.ok(r.heldMs >= r.runMs - 50, `A JOB STILL RUNNING KEEPS THE SLOT (held ${r.heldMs} ms of a ${r.runMs} ms run)`);
   assertFreed(r, 'sequential');
+});
+
+// ─── LAG197-MEMBER-KILL-IDENTITY-108: a member is killed only while its pid is still that member ─────────
+// The kill loop lists the job and kills each row. A member can end between the list and its kill, and Windows can give
+// its pid to an unrelated process: a kill by the bare pid then ends that stranger (taskkill /F: exit 1, no output). The
+// planted stranger is a stand-in of this file's own: a node that answers each write on stdin, alive until its stdin ends.
+function standIn(t) {
+  const c = spawn(process.execPath, ['-e', "process.stdin.on('data', () => process.stdout.write('pong'))"], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+  const exited = new Promise((r) => c.on('exit', (code, signal) => r({ code, signal })));
+  t.after(() => { try { c.kill(); } catch { /* gone */ } });
+  return { c, exited };
+}
+/** A fact, no timer: the stand-in answers a line (alive), or it exits (ended). */
+function answers(s) {
+  return new Promise((r) => { s.c.stdout.once('data', () => r(true)); s.exited.then(() => r(false)); try { s.c.stdin.write('ping'); } catch { r(false); } });
+}
+/** The stand-in's own row (pid, name, createdMs), read the way own-procs reads a process. */
+async function plantedRow(s) {
+  assert.equal(await answers(s), true, 'the stand-in runs');
+  const [row] = own.lookupPids([s.c.pid]);
+  assert.ok(row && row.pid === s.c.pid, `the stand-in ${s.c.pid} is in the process table`);
+  return { pid: row.pid, name: row.name, createdMs: row.created };
+}
+
+test('LIVE: a member kill never ends the process a reused pid now names (born later than the listed member)', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
+  const s = standIn(t);
+  const now = await plantedRow(s);
+  // The listed member had this pid and this name, and was born a minute before the stand-in: the pid was reused.
+  const code = await killMember({ ...now, createdMs: now.createdMs - 60_000 });
+  assert.equal(await answers(s), true, `A PID THAT NO LONGER NAMES THE LISTED MEMBER IS NEVER KILLED (pid ${now.pid} was reused by a stand-in, and the kill ended it: ${JSON.stringify(await s.exited)}; kill exit ${code})`);
+  assert.equal(code, 4, `the kill says it refused a pid that is not the listed member (exit ${code})`);
+});
+
+test('LIVE: a member kill never ends a process of another name on the listed pid', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
+  const s = standIn(t);
+  const now = await plantedRow(s);
+  const code = await killMember({ ...now, name: 'bash.exe' });
+  assert.equal(await answers(s), true, `A PID THAT NO LONGER NAMES THE LISTED MEMBER IS NEVER KILLED (pid ${now.pid} is ${now.name}, the member was bash.exe, and the kill ended it: ${JSON.stringify(await s.exited)}; kill exit ${code})`);
+  assert.equal(code, 4, `the kill says it refused a pid that is not the listed member (exit ${code})`);
+});
+
+test('LIVE: a member kill still ends the listed member itself, as taskkill /F does (exit 1)', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
+  const s = standIn(t);
+  const now = await plantedRow(s);
+  const code = await killMember(now);
+  const end = await s.exited;
+  assert.equal(code, 0, `the kill tool reports success (exit ${code})`);
+  assert.deepEqual(end, { code: KILLED_EXIT, signal: null }, `THE LISTED MEMBER IS KILLED, AS TASKKILL /F ENDS IT (${JSON.stringify(end)})`);
 });
 
 // ─── TEST-BASH-PATH-197: the Git Bash locator ────────────────────────────────
