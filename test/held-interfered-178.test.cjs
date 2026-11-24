@@ -284,7 +284,7 @@ test('fix 1: a person\'s key since the hold keeps it held (before or during the 
 
 /** A held wake, then god at the keyboard: `keys` GOD steps of the human generation (pty.ts
  *  counts both), plus `person` steps that were a person's. */
-async function heldThenGod({ keys = 1, person = 0, prompt = '', lastAt, submitted, godEnter, reportAt } = {}, M = OWNER) {
+async function heldThenGod({ keys = 1, person = 0, prompt = '', lastAt, outAt, submitted, godEnter, reportAt } = {}, M = OWNER) {
   const s = { god: 0, submitted: undefined, enterAt: undefined, reportAt: undefined };
   const { r, out } = await heldLikeDwight({ deps: {
     godGeneration: () => s.god,
@@ -292,6 +292,8 @@ async function heldThenGod({ keys = 1, person = 0, prompt = '', lastAt, submitte
     // the provider reports (then answered by time, at or after `since`).
     godEnterAt: () => s.enterAt,
     lastHumanInputAt: () => (lastAt === undefined || !s.r ? undefined : s.r.now - lastAt),
+    // HELD-WAKE-ECHO-LAG-RELEASE: `outAt` = the PTY last printed this many ms ago (as `lastAt`).
+    lastOutputAt: () => (outAt === undefined || !s.r ? undefined : s.r.now - outAt),
     submittedSince: (_p, _a, since) => (s.reportAt === undefined ? s.submitted : since <= s.reportAt)
   } }, M);
   assert.equal(out.kind, 'INTERFERED');
@@ -311,6 +313,33 @@ K.godEraseReleases = async (M = OWNER) => {
   assert.deepEqual(await r.submit('w1'), COMMITTED, 'the id is free again: the retry is delivered');
 };
 test('GOD: god\'s own term keys since the hold do not hold it like a person\'s: a clean composer after god\'s erase releases it to retry', () => K.godEraseReleases());
+
+// ─── HELD-WAKE-ECHO-LAG-RELEASE: keys that have printed nothing yet keep the hold, up to a bound ───
+// God's key 2 s ago is past HUMAN_QUIET_MS, so god-input-recent no longer holds; the composer the
+// look reads is clean (the CLI has not echoed the key). Before the fix that RELEASED.
+K.unechoedKeyStaysHeld = async (M = OWNER) => {
+  const BUDGET = OWNER.SCREEN_COMMIT_SLOW_BUDGET_MS;
+  const a = await heldThenGod({ lastAt: 2_000, outAt: 3_000 }, M);
+  const res = await a.r.recheck('w1');
+  assert.deepEqual([res.kind, res.why], ['HELD', 'input-not-echoed'], `A KEY THAT HAS PRINTED NOTHING YET KEEPS IT HELD (got ${JSON.stringify(res)})`);
+  assert.ok(a.r.owner.inhibition('p1'), 'A KEY THAT HAS PRINTED NOTHING YET KEEPS IT HELD: still inhibited');
+  const b = await heldThenGod({ lastAt: 2_000, outAt: 2_000 }, M);
+  assert.equal((await b.r.recheck('w1')).why, 'input-not-echoed', "output stamped in the write's own millisecond is not its echo");
+  const c = await heldThenGod({ lastAt: BUDGET - 1, outAt: BUDGET }, M);
+  assert.equal((await c.r.recheck('w1')).why, 'input-not-echoed', 'held up to the last millisecond of the bound');
+};
+test('ECHO LAG: a look taken before the typed keys printed anything keeps the hold', () => K.unechoedKeyStaysHeld());
+
+K.unechoedKeyBounded = async (M = OWNER) => {
+  const BUDGET = OWNER.SCREEN_COMMIT_SLOW_BUDGET_MS;
+  const a = await heldThenGod({ lastAt: BUDGET, outAt: BUDGET + 1_000 }, M);
+  const res = await a.r.recheck('w1');
+  assert.equal(res.kind, 'RELEASED', `PAST THE BOUND A KEY THAT PRINTS NOTHING NO LONGER HOLDS (got ${JSON.stringify(res)})`);
+  const b = await heldThenGod({ lastAt: 2_000, outAt: 1_999 }, M);
+  const res2 = await b.r.recheck('w1');
+  assert.equal(res2.kind, 'RELEASED', `OUTPUT SINCE THE KEY ENDS THE ECHO WAIT (got ${JSON.stringify(res2)})`);
+};
+test('ECHO LAG: the wait is bounded by SCREEN_COMMIT_SLOW_BUDGET_MS and ends on any later output', () => K.unechoedKeyBounded());
 
 K.godPlusPersonStaysHeld = async (M = OWNER) => {
   const { r } = await heldThenGod({ person: 1 }, M);
@@ -565,6 +594,7 @@ test('wiring: main runs the watch, resolves a release as "let it retry", and wor
   const wiring = readSource('src/main/automaticSubmitWiring.ts');
   assert.match(wiring, /return provider \? automaticStageQuietMs\(provider\) : null;/, 'fix 3: the owner is given the provider\'s quiet window');
   assert.match(wiring, /onInterfered: w\.onInterfered,/);
+  assert.match(wiring, /lastOutputAt: \(ptyId\) => w\.pty\.lastOutputAt\?\.\(ptyId\),/, 'HELD-WAKE-ECHO-LAG-RELEASE: the owner is given the real output stamp');
   const wake = readSource('src/main/workerWake.ts');
   assert.match(wake, /heldClaims\(\): Array<\{ agentId: string; claim: WakeClaim \}>/);
 });
@@ -601,6 +631,15 @@ const MUTANTS = [
   { name: 'GOD: god\'s keys hold it like a person\'s (the mail stuck behind god\'s fix)', file: 'src/main/automaticSubmit.ts', real: OWNER,
     edits: [["    return gen - held.humanStage === god - held.godStage ? 'GOD' : 'PERSON';", "    return 'PERSON';"]],
     killer: 'godEraseReleases', dies: /AFTER GOD'S ERASE A CLEAN COMPOSER RELEASES IT/ },
+  { name: 'ECHO LAG: the no-output check is dropped (a clean composer before the echo releases)', file: 'src/main/automaticSubmit.ts', real: OWNER,
+    edits: [["    if (this.inputNotEchoed(ptyId)) return stay('input-not-echoed', screen);\n", '']],
+    killer: 'unechoedKeyStaysHeld', dies: /A KEY THAT HAS PRINTED NOTHING YET KEEPS IT HELD/ },
+  { name: 'ECHO LAG unsound: the wait has no upper bound', file: 'src/main/automaticSubmit.ts', real: OWNER,
+    edits: [['    return out <= last && this.deps.now() - last < SCREEN_COMMIT_SLOW_BUDGET_MS;', '    return out <= last;']],
+    killer: 'unechoedKeyBounded', dies: /PAST THE BOUND A KEY THAT PRINTS NOTHING NO LONGER HOLDS/ },
+  { name: 'ECHO LAG unsound: later output does not end the wait', file: 'src/main/automaticSubmit.ts', real: OWNER,
+    edits: [['    return out <= last && this.deps.now() - last < SCREEN_COMMIT_SLOW_BUDGET_MS;', '    return this.deps.now() - last < SCREEN_COMMIT_SLOW_BUDGET_MS;']],
+    killer: 'unechoedKeyBounded', dies: /OUTPUT SINCE THE KEY ENDS THE ECHO WAIT/ },
   { name: 'GOD unsound: any key since the hold counts as god\'s', file: 'src/main/automaticSubmit.ts', real: OWNER,
     edits: [["    return gen - held.humanStage === god - held.godStage ? 'GOD' : 'PERSON';", "    return 'GOD';"]],
     killer: 'godPlusPersonStaysHeld', dies: /A PERSON'S KEY BESIDE GOD'S KEEPS IT HELD/ },

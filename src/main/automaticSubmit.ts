@@ -627,6 +627,9 @@ export interface OwnerDeps {
   /** When main last took a declared-HUMAN write on this PTY, set in the same operation
    *  as the write. Undefined = never. */
   lastHumanInputAt: (ptyId: string) => number | undefined;
+  /** HELD-WAKE-ECHO-LAG-RELEASE: when this PTY last printed anything (pty.ts stamps it on every
+   *  chunk). Undefined = no live session, or a host that cannot say: the echo check is skipped. */
+  lastOutputAt?: (ptyId: string) => number | undefined;
   abortCapability: (agentId: string) => AbortCapability;
   /** Read the rendered screen for `needle`. Resolves null when nothing can answer. */
   readScreen: (ptyId: string, needle: string, expectedTail?: string) => Promise<ScreenReading | null>;
@@ -1888,6 +1891,7 @@ export class AutomaticSubmitOwner {
     }
     const comp = judge();
     if (comp.cls !== 'READY') return stay(`${comp.cls}:${comp.reason}`, screen);
+    if (this.inputNotEchoed(ptyId)) return stay('input-not-echoed', screen);
     this.inhibited.delete(ptyId);
     if (held.decision) deps.capacity.cancelGrant(held.decision);
     this.releaseHeldId(held);
@@ -1957,6 +1961,21 @@ export class AutomaticSubmitOwner {
     const god = this.deps.godGeneration?.(ptyId);
     if (gen === undefined || god === undefined || held.godStage === undefined) return 'PERSON';
     return gen - held.humanStage === god - held.godStage ? 'GOD' : 'PERSON';
+  }
+
+  /** HELD-WAKE-ECHO-LAG-RELEASE: the last typed input (a person's or god's) has printed nothing
+   *  yet, so a clean composer proves nothing: the screen is the one of BEFORE the keys. Under load
+   *  a CLI echoed god's keys later than HUMAN_QUIET_MS; the look read the empty composer, released,
+   *  and the wake was staged again on top of the draft. Strictly later output only: an echo cannot
+   *  be stamped in the write's own millisecond, older output can.
+   *  BOUNDED by SCREEN_COMMIT_SLOW_BUDGET_MS, the owner's own limit for how late the echo of
+   *  typed text may land: past it a key that prints nothing (a no-op key) no longer holds.
+   *  KNOWN LIMIT: any output after the input counts, whether or not it is the echo. */
+  private inputNotEchoed(ptyId: string): boolean {
+    const last = this.deps.lastHumanInputAt(ptyId);
+    const out = this.deps.lastOutputAt?.(ptyId);
+    if (last === undefined || out === undefined) return false;
+    return out <= last && this.deps.now() - last < SCREEN_COMMIT_SLOW_BUDGET_MS;
   }
 
   /** GOD-TERMINAL-CONTROL (Jim MUST 1): only god typed since the hold, and has gone quiet. A
