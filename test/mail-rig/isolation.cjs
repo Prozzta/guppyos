@@ -79,11 +79,13 @@ function cachedConsoleNode(opts) {
  * Same file: one hard link (dev + ino), or the copy fallback (size + mtime; CopyFile keeps mtime).
  * The fallback also applies when both inos are real and differ, so two installs of one version unpacked
  * from the same archive (same size and mtime) count as one file. They are byte-for-byte the same build.
+ * The stats are bigint: a Windows file id is 64-bit (48 bits of file record, 16 of sequence number), and
+ * as a JS number two different files made moments apart can round to the same id above 2^53.
  */
 function sameFile(a, b) {
-  const x = fs.statSync(a), y = fs.statSync(b);
+  const x = fs.statSync(a, { bigint: true }), y = fs.statSync(b, { bigint: true });
   if (x.ino && x.ino === y.ino && x.dev === y.dev) return true;
-  return x.size === y.size && Math.trunc(x.mtimeMs) === Math.trunc(y.mtimeMs);
+  return x.size === y.size && x.mtimeMs === y.mtimeMs; // bigint mtimeMs is whole milliseconds
 }
 function linkInto(dir, exe, real) {
   fs.mkdirSync(dir, { recursive: true });
