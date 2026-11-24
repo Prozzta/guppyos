@@ -49,6 +49,23 @@ function nodeOnPath(env, platform) {
   return null;
 }
 
+/**
+ * FLAKE-RIG-ELECTRON-LEG-CONSOLE-NODE-VERSION-FAIL-108: what a failed `--version` run left behind. Node's
+ * own message is "Command failed: <cmd>" plus stderr; with an empty stderr that says nothing about whether
+ * the child was killed, could not set up its console, or exited by itself. The exit code is given in hex
+ * too (Windows status codes are read that way; -1 and 4294967295 are both 0xFFFFFFFF).
+ */
+function failedRun(e, ms) {
+  const CUT = 400;
+  const text = (v) => {
+    if (v === undefined || v === null) return 'none';
+    const s = String(v);
+    return s.length > CUT ? `${JSON.stringify(s.slice(0, CUT))} (${s.length} chars, first ${CUT})` : JSON.stringify(s);
+  };
+  const code = Number.isInteger(e.status) ? `${e.status} (0x${(e.status >>> 0).toString(16).toUpperCase().padStart(8, '0')})` : 'none';
+  return `exit code ${code}, signal ${e.signal || 'none'}, error code ${e.code || 'none'}, after ${ms} ms, stderr ${text(e.stderr)}, stdout ${text(e.stdout)}`;
+}
+
 /** Throws, naming `from`, unless `file` is a console-subsystem Node that runs. Returns its version. */
 function assertConsoleNode(file, from, { platform = process.platform, run = execFileSync } = {}) {
   if (isElectronName(file)) throw new Error(`no console node.exe: ${from} is electron.exe (${file}), a GUI-subsystem program that a PTY does not attach`);
@@ -57,8 +74,9 @@ function assertConsoleNode(file, from, { platform = process.platform, run = exec
     if (sub !== SUBSYSTEM_CONSOLE) throw new Error(`no console node.exe: ${from} (${file}) has PE subsystem ${sub}${sub === SUBSYSTEM_GUI ? ' (GUI)' : ''}, not 3 (console): a PTY does not attach it`);
   }
   let version;
+  const startedMs = Date.now();
   try { version = String(run(file, ['--version'], { encoding: 'utf8', windowsHide: true, env: process.env })).trim(); } catch (e) {
-    throw new Error(`no console node.exe: ${from} (${file}) did not run --version: ${e.message}`);
+    throw new Error(`no console node.exe: ${from} (${file}) did not run --version: ${e.message} [${failedRun(e, Date.now() - startedMs)}]`);
   }
   if (!/^v\d+\.\d+\.\d+/.test(version)) throw new Error(`no console node.exe: ${from} (${file}) answered --version with ${JSON.stringify(version.slice(0, 60))}`);
   return version;
