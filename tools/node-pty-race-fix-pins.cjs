@@ -331,6 +331,85 @@ const CONPTY_CC_CLOSE_EDITS = [
     '  exports.Set("guppyClosesPseudoConsoleOnExit", Napi::Boolean::New(env, true));\n' +
     '  return exports;\n']
 ];
+// PTY-NATURAL-EXIT-JOIN (FLAKE-PTY-NATURAL-EXIT-READY-EXITCODE-UNDEFINED-108, tools/patch-node-pty-root-handle.cjs):
+// the terminal reports a natural exit only once both the output close and the exit code have
+// arrived. The edits live here, like WORKER_JS_EDITS, so that a test can take them back out.
+// AGENT_JS_JOIN_EDITS: the last agent edit; the exit the terminal's close left is emitted last.
+const AGENT_JS_JOIN_EDITS = [
+  ['the report runs the exit the output close left for it',
+    '    };\n' +
+    '    WindowsPtyAgent.prototype._flushDataAndCleanUp = function () {\n',
+    '        // GUPPY PTY-NATURAL-EXIT-JOIN (tools/patch-node-pty-root-handle.cjs): a terminal whose output\n' +
+    '        // closed before this report ran left its \'exit\' here (windowsTerminal.js, the close\n' +
+    '        // listener). It runs as the last step, with _exitCode set, and at most once: it is cleared\n' +
+    '        // before it runs.\n' +
+    '        var guppyPendingExit = this._guppyPendingExit;\n' +
+    '        this._guppyPendingExit = undefined;\n' +
+    '        if (typeof guppyPendingExit === \'function\') {\n' +
+    '            guppyPendingExit();\n' +
+    '        }\n' +
+    '    };\n' +
+    '    WindowsPtyAgent.prototype._flushDataAndCleanUp = function () {\n']
+];
+// TERMINAL_JS_EDITS: lib/windowsTerminal.js, the proof that the report is coming, and the close.
+const TERMINAL_JS_EDITS = [
+  ['the proof that the exit report is on its way',
+    'var DEFAULT_NAME = \'Windows Shell\';\n',
+    'var DEFAULT_NAME = \'Windows Shell\';\n' +
+    '// GUPPY PTY-NATURAL-EXIT-JOIN (tools/patch-node-pty-root-handle.cjs). node-pty emits \'exit\' when\n' +
+    '// the output socket closes, and reads the code at that moment. On ConPTY only the native exit\n' +
+    '// report (_$onProcessExit) sets the code. The native exit thread queues that report (BlockingCall\n' +
+    '// on an unlimited queue returns once the call is queued) and then starts the pseudoconsole close,\n' +
+    '// so the console host can close the output pipe before the queued report has run. \'exit\' then\n' +
+    '// carried undefined, and the real code was lost.\n' +
+    '// So the close waits for the report, but only when the report is PROVEN to be on its way: ConPTY,\n' +
+    '// no code yet, a positive root pid, and process.kill(pid, 0) throws ESRCH (signal 0 sends nothing;\n' +
+    '// the root has ended). The pid is still the root\'s: the agent\'s _rootHandle\n' +
+    '// (PTY-HOLD-NODEPTY-HANDOFF) holds it. An ended root means the native wait has returned, so the\n' +
+    '// report is queued or about to be. No timer and no retry.\n' +
+    '// RESIDUALS, each emits at the close as before, with the code undefined: a root that ended with\n' +
+    '// exit code 259 (STILL_ACTIVE) reads alive to signal 0; EPERM or any other throw; winpty. At\n' +
+    '// environment teardown (napi_closing) the report never reaches JS, so a deferred exit is lost,\n' +
+    '// but no JS runs then anyway.\n' +
+    '// Under the deferral the \'exit\' listeners run inside the native exit callback instead of a socket\n' +
+    '// event. A throw from one is uncaught either way.\n' +
+    'function guppyExitReportComing(agent) {\n' +
+    '    if (!agent || agent._useConpty !== true || agent._exitCode !== undefined) {\n' +
+    '        return false;\n' +
+    '    }\n' +
+    '    var pid = agent._innerPid;\n' +
+    '    if (!Number.isInteger(pid) || pid <= 0) {\n' +
+    '        return false;\n' +
+    '    }\n' +
+    '    try {\n' +
+    '        process.kill(pid, 0);\n' +
+    '    }\n' +
+    '    catch (e) {\n' +
+    '        return !!e && e.code === \'ESRCH\';\n' +
+    '    }\n' +
+    '    return false;\n' +
+    '}\n'],
+  ['the close emits now, or leaves the exit to the report',
+    '            _this._socket.on(\'close\', function () {\n' +
+    '                _this.emit(\'exit\', _this._agent.exitCode);\n' +
+    '                _this._close();\n' +
+    '            });\n',
+    '            _this._socket.on(\'close\', function () {\n' +
+    '                // GUPPY PTY-NATURAL-EXIT-JOIN (tools/patch-node-pty-root-handle.cjs): the root has\n' +
+    '                // ended and its report has not run yet. Neither emit nor _close() here: the report\n' +
+    '                // runs both, in this order, once it has set the code (windowsPtyAgent.js).\n' +
+    '                var guppyAgent = _this._agent;\n' +
+    '                if (guppyExitReportComing(guppyAgent)) {\n' +
+    '                    guppyAgent._guppyPendingExit = function () {\n' +
+    '                        _this.emit(\'exit\', _this._agent.exitCode);\n' +
+    '                        _this._close();\n' +
+    '                    };\n' +
+    '                    return;\n' +
+    '                }\n' +
+    '                _this.emit(\'exit\', _this._agent.exitCode);\n' +
+    '                _this._close();\n' +
+    '            });\n']
+];
 // Binary fingerprint of the close: the export name above, as bytes in conpty.node.
 const CLOSE_MARKER = 'guppyClosesPseudoConsoleOnExit';
 const hasCloseMarker = (file) => { try { return fs.readFileSync(file).includes(Buffer.from(CLOSE_MARKER, 'latin1')); } catch { return false; } };
@@ -352,9 +431,18 @@ module.exports = {
   CONPTY_CC_CLOSE_EDITS,
   CLOSE_MARKER,
   hasCloseMarker,
-  // lib/windowsPtyAgent.js: from the same tarball, and after the handoff patch.
+  // lib/windowsPtyAgent.js: from the same tarball, and after ALL its edits (the handoff, the close on
+  // exit and the PTY-NATURAL-EXIT-JOIN pending exit): what the record and the release markers require.
   AGENT_JS_PRISTINE_SHA256: '8636d16b38266112204061a22b135734177c242837982fd3a4055be726efa64a',
-  AGENT_JS_HANDOFF_SHA256: '5e29f715839d25d7d20c540eebc497ca9b8b64d62b569a88bf0c3c27c503e045',
+  AGENT_JS_HANDOFF_SHA256: '55578f4db6ea9cee2cb03ff250320018688c46c13e996d43465441d043ea775e',
+  // The agent as patched before PTY-NATURAL-EXIT-JOIN: a state in between, like CONPTY_CC_HANDOFF.
+  AGENT_JS_PRE_JOIN_SHA256: '5e29f715839d25d7d20c540eebc497ca9b8b64d62b569a88bf0c3c27c503e045',
+  AGENT_JS_JOIN_EDITS,
+  TERMINAL_JS_EDITS,
+  // lib/windowsTerminal.js (PTY-NATURAL-EXIT-JOIN): from the same tarball, and after the patch that
+  // lets a natural exit carry its code.
+  TERMINAL_JS_PRISTINE_SHA256: 'c3a65716f53fed0135a8a633373d5f9c2ab092544d651f27ef0a67096dd3bcd9',
+  TERMINAL_JS_JOIN_SHA256: '396bafca85fd15f68fdaee4566d90be01d9e221e63714ad32db047cf58c46166',
   // lib/utils.js (NODEPTY-PACKAGED-PROOF): from the same tarball, and after the loader patch that
   // stops Windows from falling back to node-pty's unpatched prebuilt binaries.
   UTILS_JS_PRISTINE_SHA256: 'f75ad341c13fbf1a9a6605d7ee42dff5bbc5d43b7b381e413fb97eb1b8300beb',

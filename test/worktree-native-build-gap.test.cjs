@@ -436,11 +436,14 @@ test('NODE-PTY GAP: the real patch tool takes the check as inspect sends it, and
   put(root, 'node_modules/node-pty/package.json', JSON.stringify({ name: 'node-pty', version: pins.NODE_PTY_VERSION }));
   put(root, 'node_modules/node-pty/src/win/conpty.cc', '// not the pinned source\n');
   put(root, 'node_modules/node-pty/lib/windowsPtyAgent.js', '// not the pinned agent\n');
+  // PTY-NATURAL-EXIT-JOIN: the terminal is a patched file too.
+  put(root, 'node_modules/node-pty/lib/windowsTerminal.js', '// not the pinned terminal\n');
   put(root, 'node_modules/node-pty/build/Release/conpty.node', BUILT_BINARY);
   const state = W.nodePtyState(root, { platform: 'win32' });
   assert.equal(state.ok, false, 'the real --check exits nonzero');
   assert.match(state.problem, /not PTY-HOLD-NODEPTY-HANDOFF patched/);
   assert.equal(fs.readFileSync(path.join(root, 'node_modules/node-pty/src/win/conpty.cc'), 'utf8'), '// not the pinned source\n', 'the check changed nothing');
+  assert.equal(fs.readFileSync(path.join(root, 'node_modules/node-pty/lib/windowsTerminal.js'), 'utf8'), '// not the pinned terminal\n', 'nor the terminal');
 });
 
 // WORKTREE-SETUP-MODEL-108: the embedding model is gitignored (resources/models/*/), so a fresh

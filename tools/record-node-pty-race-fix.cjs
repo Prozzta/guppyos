@@ -5,7 +5,9 @@
 // (#922, then the PTY-HOLD-NODEPTY-HANDOFF root-handle handoff, then the
 // PTY-CONHOST-LEAK-NATIVE close on exit):
 // node-pty is the pinned 1.1.0, conpty.cc is byte-for-byte the pinned built
-// form (CONPTY_CC_BUILT_SHA256), lib/windowsPtyAgent.js is its pinned handoff form, and build/Release/conpty.node is newer than that patched source (a
+// form (CONPTY_CC_BUILT_SHA256), lib/windowsPtyAgent.js is its pinned handoff form,
+// lib/windowsTerminal.js is its pinned join form (PTY-NATURAL-EXIT-JOIN: a natural exit carries
+// its code), and build/Release/conpty.node is newer than that patched source (a
 // binary built before the patch, or a stale copy, is refused rather than
 // blessed). scripts/release-markers.cjs re-checks the recorded digests.
 const fs = require('node:fs');
@@ -28,6 +30,9 @@ if (sourceSha256 !== pins.CONPTY_CC_BUILT_SHA256) fail(`conpty.cc is not the pin
 const agentPath = path.join(root, 'lib', 'windowsPtyAgent.js');
 const agentSha256 = fs.existsSync(agentPath) ? hash(agentPath) : 'missing';
 if (agentSha256 !== pins.AGENT_JS_HANDOFF_SHA256) fail(`lib/windowsPtyAgent.js is not the pinned root-handle form (sha256 ${agentSha256})`);
+const terminalPath = path.join(root, 'lib', 'windowsTerminal.js');
+const terminalSha256 = fs.existsSync(terminalPath) ? hash(terminalPath) : 'missing';
+if (terminalSha256 !== pins.TERMINAL_JS_JOIN_SHA256) fail(`lib/windowsTerminal.js is not the pinned natural-exit join form (sha256 ${terminalSha256})`);
 const sourceStat = fs.statSync(sourcePath);
 // node-pty loads this Electron-ABI build; npm's prebuilds are for stock Node
 // and cannot be rebuilt against Electron here.
