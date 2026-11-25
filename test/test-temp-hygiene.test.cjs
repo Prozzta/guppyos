@@ -160,6 +160,46 @@ test('REMOVEDIR: waits while something holds the folder, and gives up after its 
   assert.equal(calls, 5, 'TEMP REMOVE: at 0, 250, 500, 750 and 1000 ms, then no more');
 });
 
+// Red before rmTree under Electron: its rmSync cannot remove a read-only file on Windows (EPERM), so
+// removeDir returned false and the folder stayed. Node's rmSync removes one, so the Node leg is green either way.
+// budgetMs 0 is for THIS call only (one try, no wait); the default budget is untouched.
+test('REMOVEDIR: a folder that holds READ-ONLY files goes at the first try (a temp git repo has them)', async () => {
+  const { removeDir } = require('./tools/test-temp.cjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ro-'));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'ro-out-'));
+  const kept = path.join(outside, 'kept.txt');
+  try {
+    fs.mkdirSync(path.join(dir, 'objects', '0b'), { recursive: true });
+    for (const f of [path.join(dir, 'top.txt'), path.join(dir, 'objects', '0b', 'deep')]) { fs.writeFileSync(f, 'x'); fs.chmodSync(f, 0o444); }
+    fs.writeFileSync(kept, 'x');
+    fs.chmodSync(kept, 0o444);
+    fs.symlinkSync(outside, path.join(dir, 'link'), 'junction');
+    assert.equal(await removeDir(dir, { budgetMs: 0 }), true, 'TEMP REMOVE: read-only files do not stop the removal');
+    assert.equal(fs.existsSync(dir), false, 'TEMP REMOVE: the folder is gone');
+    assert.equal(fs.readFileSync(kept, 'utf8'), 'x', 'TEMP REMOVE: a file behind a link out of the folder stays');
+    assert.equal(fs.statSync(kept).mode & 0o200, 0, 'TEMP REMOVE: and it stays read-only (links are not followed)');
+  } finally {
+    for (const d of [dir, outside]) {
+      if (!fs.existsSync(d)) continue;
+      for (const f of [path.join(d, 'top.txt'), path.join(d, 'objects', '0b', 'deep'), path.join(d, 'kept.txt')]) { try { fs.chmodSync(f, 0o666); } catch { /* not there */ } }
+      fs.rmSync(d, { recursive: true, force: true });
+    }
+  }
+});
+
+test('TEMPDIR: a tempDir folder that holds a READ-ONLY file is gone when the file\'s process ends', () => {
+  const root = fresh('tempdir-ro');
+  const script = path.join(fresh('script-ro'), 'uses.test.cjs');
+  fs.writeFileSync(script, `const { tempDir } = require(${JSON.stringify(path.join(__dirname, 'tools', 'test-temp.cjs'))});const fs = require('fs');const p = require('path');`
+    + "const a = tempDir('ro-'); fs.writeFileSync(p.join(a, 'x'), '1'); fs.chmodSync(p.join(a, 'x'), 0o444); console.log(a);\n");
+  const env = { ...process.env, TEMP: root, TMP: root, TMPDIR: root };
+  delete env.NODE_TEST_CONTEXT;
+  const r = spawnSync(process.execPath, [script], { env, encoding: 'utf8', windowsHide: true, timeout: 60_000 });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout.split(/\r?\n/).filter((l) => l.startsWith(root)).length, 1, `TEMP DIR: the folder was made in the temp folder\n${r.stdout}`);
+  assert.deepEqual(fs.readdirSync(root), [], 'TEMP DIR: and it is removed when the process ends');
+});
+
 // INT102-TEST-FOLLOWUPS (Jim, INT-1.1.102 NIT 1): GUPPY_SHARED_LOCALAPPDATA, the REAL local app-data
 // folder, reaches every jailed child. It is read-only by convention; this pins the convention: one
 // setter (the preload), only the known readers, and those readers only list and test paths in it.

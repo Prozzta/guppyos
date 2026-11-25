@@ -179,7 +179,9 @@ test('the CLI reads an app.asar\'s CHANGELOG, and exits 1 on a dropped heading, 
 
 test('the base is the newest v* tag behind HEAD other than this version\'s; with none, the CLI FAILS', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clbase-'));
-  t.after(() => removeDir(dir));
+  // git writes its object files read-only; removeDir removes those too (tools/test-temp.cjs rmTree).
+  // The answer is checked: a temp repo left behind is a red on this cell, not a TEMP LEAK line later.
+  t.after(async () => { assert.equal(await removeDir(dir), true, `the temp repo is removed: ${dir}`); assert.equal(fs.existsSync(dir), false); });
   fs.mkdirSync(path.join(dir, 'scripts'));
   fs.copyFileSync(SCRIPT, path.join(dir, 'scripts', 'verify-changelog-history.cjs'));
   fs.writeFileSync(path.join(dir, 'package.json'), '{"version":"1.1.99"}');
