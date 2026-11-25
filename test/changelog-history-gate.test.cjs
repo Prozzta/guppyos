@@ -179,7 +179,11 @@ test('the CLI reads an app.asar\'s CHANGELOG, and exits 1 on a dropped heading, 
 
 test('the base is the newest v* tag behind HEAD other than this version\'s; with none, the CLI FAILS', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clbase-'));
-  t.after(() => removeDir(dir));
+  // git writes its object files read-only. On Windows the rmSync of Electron 45 (node 24) cannot remove a
+  // read-only file (EPERM) where Node 26's can, so removeDir spent its whole budget and left the folder.
+  // The repo is made writable first, and the answer of removeDir is checked: a folder left behind is a red.
+  const writable = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) writable(p); else fs.chmodSync(p, 0o666); } };
+  t.after(async () => { writable(dir); assert.equal(await removeDir(dir), true, `the temp repo is removed: ${dir}`); assert.equal(fs.existsSync(dir), false); });
   fs.mkdirSync(path.join(dir, 'scripts'));
   fs.copyFileSync(SCRIPT, path.join(dir, 'scripts', 'verify-changelog-history.cjs'));
   fs.writeFileSync(path.join(dir, 'package.json'), '{"version":"1.1.99"}');
