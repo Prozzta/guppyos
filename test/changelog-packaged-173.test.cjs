@@ -23,6 +23,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { removeDir } = require('./tools/test-temp.cjs');
+const { packClosed } = require('./tools/asar-closed.cjs');
 const asar = require('@electron/asar');
 const { readSource: read } = require('./read-source.cjs');
 const { verify, releaseNotesOf } = require('../scripts/verify-packaged-changelog.cjs');
@@ -47,7 +48,7 @@ async function pack(t, files) {
     fs.writeFileSync(path.join(src, rel), body);
   }
   const out = path.join(dir, 'app.asar');
-  await asar.createPackage(src, out);
+  await packClosed(asar, src, out);
   return out;
 }
 
