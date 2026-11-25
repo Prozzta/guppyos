@@ -307,7 +307,7 @@ test('own-procs, real (win32): kills a tree of TWO children it started, and not 
   // ELECTRON-LEG-HARNESS-ENV-108: the recorded name is the image actually spawned (electron.exe on the
   // Electron leg, where a hard-coded node.exe made every row a stranger and stillOurs null).
   const IMAGE = path.basename(process.execPath);
-  const start = () => { const c = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true }); return { c, rec: { pid: c.pid, bornMs: Date.now(), name: IMAGE }, exit: new Promise((r) => c.once('exit', r)) }; };
+  const start = () => { const beforeMs = Date.now(); const c = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true }); return { c, beforeMs, rec: { pid: c.pid, bornMs: Date.now(), name: IMAGE }, exit: new Promise((r) => c.once('exit', r)) }; };
   const a = start(), b = start(), keep = start();
   try {
     await new Promise((r) => setTimeout(r, 500));
@@ -318,7 +318,18 @@ test('own-procs, real (win32): kills a tree of TWO children it started, and not 
     assert.strictEqual(r.attempted.length, 2);
     await Promise.all([a.exit, b.exit]);
     // Date.now() right after the spawn is ours under the exact rule (no slack)
-    assert.strictEqual(own.stillOurs(keep.rec).pid, keep.c.pid, 'the spawner\'s Date.now() is at or after the CreationDate');
+    // FLAKE-OWN-PROCS-STILLOURS-NULL-LIVE-CHILD-108: this answer was once null for the live child, and the
+    // red said only "null". ONE table for the answer and for the text, so a red names which of the three
+    // null paths it took: no row under the pid, a row created AFTER the recorded birth, or another name.
+    const table = own.processTable();
+    const mine = own.stillOurs(keep.rec, { table: () => table });
+    const row = table.find((x) => x.pid === keep.c.pid);
+    const how = row
+      ? `the pid's row was created at ${row.created}, ${row.created - keep.rec.bornMs} ms after the recorded birth ${keep.rec.bornMs} `
+        + `(${row.created - keep.beforeMs} ms after the Date.now() taken just before the spawn), with the name ${row.name} (recorded ${IMAGE})`
+      : `no row under pid ${keep.c.pid} in a table of ${table.length} row(s); the child's exitCode is ${keep.c.exitCode}, signalCode ${keep.c.signalCode}`;
+    assert.ok(mine, `stillOurs answered null for the live child this test started: ${how}`);
+    assert.strictEqual(mine.pid, keep.c.pid, 'the spawner\'s Date.now() is at or after the CreationDate');
     // the pid of a live process, recorded with a birth BEFORE it was created: a reused pid, never killed
     const k = own.killOwnTree({ ...keep.rec, bornMs: keep.rec.bornMs - 3600_000 });
     assert.deepStrictEqual(k.attempted, []);
