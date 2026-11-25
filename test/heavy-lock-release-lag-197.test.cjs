@@ -490,12 +490,26 @@ async function liveRelease(t, o) {
     onJob: (e) => { if (e.state === 'held') lock.noteJob(e.agentId, e.callId, e.job); else if (e.state === 'lost') lock.jobLost(e.agentId, e.callId, e.job, e.why); else lock.jobExited(e.agentId, e.callId, e.job); }
   });
   t.after(() => jobs.dispose());
+  // FLAKE-LAG197-LATE-MEMBER-984-WRONG-RED-108: the product starts its helper before the first heavy call (warm(), so the
+  // .NET cold start is not paid inside a hook's wait). This did not: on a loaded Electron leg the cold helper missed the
+  // create's 2.5 s deadline, the job was never held, the lock never heard of it, and every cell read the run as the product's.
+  // Warm it the product's way and wait for that first answer (its own start budget), before the slot is taken.
+  if (typeof jobs.warm === 'function') {
+    jobs.warm();
+    const upBy = Date.now() + (Cm.HEAVY_JOB_START_MS ?? 12_000);
+    let up;
+    while (!(up = rows.find((r) => r.action === 'helper-start')) && Date.now() < upBy) await new Promise((r) => setTimeout(r, 25));
+    assert.ok(up && up.ok === true, `THE HELPER ANSWERS ITS WARM-UP BEFORE THE CALL (${up ? JSON.stringify(up) : 'no helper-start row'})`);
+  }
   assert.equal(lock.acquire(AGENT, BENCH, 'bash cut.sh', 'call-1', true).acquired, true);
   // FLAKE-HEAVY-LOCK-LATE-MEMBER-RECUR-ELECTRON-108: o.lateMember makes the body itself (a member that stamps its own start and end).
   const member = o.lateMember ? lateMemberFiles(o.lateMember) : null;
   const body = member ? member.body : o.body;
   const wrapped = await jobs.begin(AGENT, { command: body }, false, 'call-1');
   assert.ok(wrapped, 'the call is wrapped');
+  // A job that is not held is not the case any LIVE cell judges: a red of its own, by name, never one read as the release's.
+  const wrapRow = rows.find((r) => r.action === 'wrap');
+  assert.ok(wrapRow && wrapRow.held === true, `THE CALL'S JOB IS HELD (${JSON.stringify(rows.filter((r) => r.kind === 'heavy-cpu').map((r) => [r.action, r.cause, r.ms, r.held]))})`);
   const id = jobs.ids()[0];
   // INT 1.1.102: cap-199's join writes its shell marker under LOCALAPPDATA; give it a folder of this
   // file's own, removed with the helpers (it was a TEMP LEAK, "Munder Difflin", under the runner's jail).
@@ -1018,7 +1032,7 @@ test('the late-member check fails a missing stamp, an early release, a late rele
 test('LIVE: the late-member check goes red on a slot freed while the member runs', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
   // test mutant: a product that frees the slot 1.5 s in (about the shell's exit), with the late member still running
   const early = await liveRelease(t, { lateMember: true, releaseEarly: 1_500 });
-  t.diagnostic(`freed early: ${early.relAt - early.member.endAt} ms from the member's end stamp; ${memberText(early)}`);
+  t.diagnostic(`freed early: ${early.relAt === null || !early.member || early.member.endAt === null ? 'not freed' : `${early.relAt - early.member.endAt} ms from the member's end stamp`}; ${memberText(early)}`);
   assert.throws(() => assertLateMember(early), /A MEMBER THAT JOINED AFTER THE SNAPSHOT KEEPS THE SLOT \(freed \d+ ms before the member's end stamp/);
 });
 
