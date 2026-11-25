@@ -12,13 +12,37 @@ const path = require('node:path');
 
 const made = [];
 
+// Clears the read-only bit under `dir` without following a symlink or junction outside it.
+function makeWritable(dir) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const file = path.join(dir, entry.name);
+    const stat = fs.lstatSync(file);
+    if (stat.isSymbolicLink()) continue;
+    if (stat.isDirectory()) makeWritable(file); else fs.chmodSync(file, 0o666);
+  }
+}
+
+/**
+ * Removes a tree containing read-only files. Electron 45's rmSync reports EPERM for those files
+ * on Windows, although current Node removes them. Retry once only after clearing their read-only
+ * bit; any other error, or a second failure, remains the caller's normal removal failure.
+ */
+function rmTree(dir, options = {}) {
+  const rmOptions = { recursive: true, force: true, ...options };
+  try { fs.rmSync(dir, rmOptions); } catch (error) {
+    if (error.code !== 'EPERM') throw error;
+    try { makeWritable(dir); } catch { throw error; }
+    fs.rmSync(dir, rmOptions);
+  }
+}
+
 /**
  * Removes `dir` (await it in t.after), trying again every 250 ms for up to `budgetMs` while
  * something still holds a file in it: a write stream of this process that has not closed yet, or
  * a child that is still exiting. The wait is async: a sync wait (rmSync's own retries) blocks the
  * very event loop that would close this process's handle. True when it is gone.
  */
-async function removeDir(dir, { budgetMs = 30_000, rm = (d) => fs.rmSync(d, { recursive: true, force: true }), now = Date.now,
+async function removeDir(dir, { budgetMs = 30_000, rm = rmTree, now = Date.now,
   pause = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
   const end = now() + budgetMs;
   for (;;) {
@@ -29,7 +53,7 @@ async function removeDir(dir, { budgetMs = 30_000, rm = (d) => fs.rmSync(d, { re
 
 function removeAll() {
   for (const d of made.splice(0)) {
-    try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* run-tests names it */ }
+    try { rmTree(d, { maxRetries: 5, retryDelay: 100 }); } catch { /* run-tests names it */ }
   }
 }
 
