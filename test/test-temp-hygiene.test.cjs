@@ -190,6 +190,26 @@ test('REMOVEDIR: a folder holding READ-ONLY files goes at the first try without 
   }
 });
 
+test('REMOVEDIR: a child junction is unlinked before recursive removal reaches its writable target', async (t) => {
+  const { removeDir } = require('./tools/test-temp.cjs');
+  const disk = process.versions.electron ? require('original-fs') : fs;
+  const dir = disk.mkdtempSync(path.join(os.tmpdir(), 'ro-child-'));
+  const outside = disk.mkdtempSync(path.join(os.tmpdir(), 'ro-child-out-'));
+  const kept = path.join(outside, 'kept-rw.txt');
+  try {
+    disk.writeFileSync(kept, 'x');
+    try { disk.symlinkSync(outside, path.join(dir, 'a-outside'), 'junction'); } catch (error) { t.skip(`junction unavailable: ${error.message}`); return; }
+    const owned = path.join(dir, 'z-read-only.txt');
+    disk.writeFileSync(owned, 'x'); disk.chmodSync(owned, 0o444);
+    assert.equal(await removeDir(dir, { budgetMs: 0 }), true, 'TEMP REMOVE: the owned read-only file does not stop removal');
+    assert.equal(disk.readFileSync(kept, 'utf8'), 'x', 'TEMP REMOVE: a writable file behind the child junction stays');
+  } finally {
+    for (const d of [dir, outside]) {
+      if (disk.existsSync(d)) await removeDir(d, { budgetMs: 0 });
+    }
+  }
+});
+
 test('REMOVEDIR: a root junction is unlinked without changing its read-only target', async (t) => {
   const { removeDir } = require('./tools/test-temp.cjs');
   const disk = process.versions.electron ? require('original-fs') : fs;
