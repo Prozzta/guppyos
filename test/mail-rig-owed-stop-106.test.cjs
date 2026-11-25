@@ -27,10 +27,14 @@ const SPEC = [{ id: ID, flavour: 'codex', scenario: { manualTurns: true } }];
 const BEAT = { settle: false, holdWhileBusy: true, stepMs: 15_000, tries: 20 };
 
 const kinds = (rig, kind) => rig.transcript(ID).filter((r) => r.kind === kind);
+// diagnostic only: the mail rows of the rig plus the stub's own hook/cue records (hook-start = the POST was sent, hook = it returned, ms = its round trip)
+const stubDiag = async (rig) => `${await rig.diagnose(ID)}
+stub: ${rig.transcript(ID).filter((r) => /^(cue|cue-done|hook-start|hook|stop-blocked|turn-end)$/.test(r.kind)).map((r) => [r.kind, r.cue ?? r.event, r.ms].filter((x) => x !== undefined).join(":")).join(" ")}`;
 async function cue(rig, c) {
   const n = kinds(rig, 'cue-done').length;
   rig.cue(ID, c);
-  await waitFor(() => kinds(rig, 'cue-done').length > n, { what: `cue ${c.cue} done` });
+  // diagnostic (FLAKE-MAIL-RIG-OWED-STOP-106-NOTOOLS-CUE-TIMEOUT-108): a timeout names the stub hook-start / hook rows
+  await waitFor(() => kinds(rig, 'cue-done').length > n, { what: `cue ${c.cue} done`, diag: () => stubDiag(rig) });
 }
 const owedRows = async (rig) => (await rig.rows('wake-stop')).filter((r) => r.agentId === ID && /^OWED_/.test(r.outcome));
 async function surface(rig, msg) {
