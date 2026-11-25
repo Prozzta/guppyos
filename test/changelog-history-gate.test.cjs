@@ -19,6 +19,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { removeDir } = require('./tools/test-temp.cjs');
+const { packClosed } = require('./tools/asar-closed.cjs');
 const { readSource: read } = require('./read-source.cjs');
 const { releasedSections, checkHistory, readChangelog } = require('../scripts/verify-changelog-history.cjs');
 
@@ -144,7 +145,7 @@ test('the CLI reads an app.asar\'s CHANGELOG, and exits 1 on a dropped heading, 
     fs.mkdirSync(src);
     fs.writeFileSync(path.join(src, 'CHANGELOG.md'), changelog);
     fs.writeFileSync(path.join(src, 'package.json'), '{}');
-    await asar.createPackage(src, path.join(dir, `${name}.asar`));
+    await packClosed(asar, src, path.join(dir, `${name}.asar`));
     return path.join(dir, `${name}.asar`);
   };
   // The base is this tree's CHANGELOG at HEAD; the targets are it with and without its second heading.
@@ -168,7 +169,7 @@ test('the CLI reads an app.asar\'s CHANGELOG, and exits 1 on a dropped heading, 
   const bare = path.join(dir, 'bare');
   fs.mkdirSync(bare);
   fs.writeFileSync(path.join(bare, 'package.json'), '{}');
-  await asar.createPackage(bare, path.join(dir, 'bare.asar'));
+  await packClosed(asar, bare, path.join(dir, 'bare.asar'));
   for (const target of [path.join(dir, 'missing.asar'), path.join(dir, 'bare.asar')]) {
     const r = cli(target, '--base', 'HEAD');
     assert.equal(r.status, 1, `${path.basename(target)} fails`);

@@ -21,6 +21,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { removeDir } = require('./tools/test-temp.cjs');
+const { packClosed } = require('./tools/asar-closed.cjs');
 const Module = require('node:module');
 const asar = require('@electron/asar');
 const { readSource: read } = require('./read-source.cjs');
@@ -108,7 +109,7 @@ async function pack(t, files) {
   }
   const out = path.join(dir, 'app.asar');
   // As electron-builder.yml's asarUnpack: node-pty lives beside the asar, and the listing still has it.
-  await asar.createPackage(src, out, { unpack: '**/node_modules/node-pty/**' });
+  await packClosed(asar, src, out, { unpack: '**/node_modules/node-pty/**' });
   return out;
 }
 
