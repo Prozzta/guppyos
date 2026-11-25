@@ -23,6 +23,8 @@ const ID = 'cx-1';
 // FLAKE-RIG176-STARVED-STUB-NO-ENTER-108: the timeline a red prints, in real ms after the `send`
 // call (T0). Read once, after the cell's own waits, from what the rig already keeps. The host's
 // diags carry the simulated clock, which does not move after T0, so one offset converts them.
+// Outcomes need no offset: the submit owner that reports them runs on the real clock
+// (rig-host.cjs, `new AutomaticSubmitOwner` with `now: Date.now`).
 const timeline = async (rig, T0) => {
   const show = (s) => JSON.stringify(String(s)).slice(0, 90);
   const lines = [];

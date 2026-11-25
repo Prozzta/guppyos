@@ -812,7 +812,6 @@ class FakeAgent {
 
 // ————————————————————————————————————————————————————————————— helpers
 
-/** The context the provider hands its model, from a hook response in the provider's own contract. */
 /**
  * FLAKE-RIG176-STARVED-STUB-NO-ENTER-108: does a stdin chunk carry the submitting Enter?
  * Returns a function to call once per chunk, in arrival order. A `\r` inside a bracketed paste
@@ -839,6 +838,7 @@ function enterScanner() {
   };
 }
 
+/** The context the provider hands its model, from a hook response in the provider's own contract. */
 function contextOf(resp, flavour, event) {
   if (!resp || typeof resp !== 'object') return '';
   if (flavour === 'agy') {
