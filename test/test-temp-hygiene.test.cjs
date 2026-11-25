@@ -179,6 +179,7 @@ test('REMOVEDIR: a folder holding READ-ONLY files goes at the first try without 
     try { disk.symlinkSync(outside, path.join(dir, 'outside'), 'junction'); } catch (error) { t.skip(`junction unavailable: ${error.message}`); return; }
     assert.equal(await removeDir(dir, { budgetMs: 0 }), true, 'TEMP REMOVE: read-only files do not stop removal');
     assert.equal(disk.existsSync(dir), false, 'TEMP REMOVE: the folder is gone');
+    assert.equal(disk.existsSync(kept), true, 'TEMP REMOVE: it stays read-only too');
     assert.equal(disk.readFileSync(kept, 'utf8'), 'x', 'TEMP REMOVE: a file behind the junction stays');
     assert.equal(disk.statSync(kept).mode & 0o200, 0, 'TEMP REMOVE: it stays read-only too');
     assert.equal(disk.readFileSync(keptWritable, 'utf8'), 'x', 'TEMP REMOVE: a writable file behind the junction stays too');
@@ -202,6 +203,7 @@ test('REMOVEDIR: a child junction is unlinked before recursive removal reaches i
     const owned = path.join(dir, 'z-read-only.txt');
     disk.writeFileSync(owned, 'x'); disk.chmodSync(owned, 0o444);
     assert.equal(await removeDir(dir, { budgetMs: 0 }), true, 'TEMP REMOVE: the owned read-only file does not stop removal');
+    assert.equal(disk.existsSync(kept), true, 'TEMP REMOVE: a writable file behind the child junction stays');
     assert.equal(disk.readFileSync(kept, 'utf8'), 'x', 'TEMP REMOVE: a writable file behind the child junction stays');
   } finally {
     for (const d of [dir, outside]) {
