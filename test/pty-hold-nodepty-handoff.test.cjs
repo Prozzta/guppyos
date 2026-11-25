@@ -39,6 +39,7 @@ const { spawnSync } = require('node:child_process');
 const loadTs = require('./load-ts.cjs');
 const { readSource } = require('./read-source.cjs');
 const { tempDir, removeDir } = require('./tools/test-temp.cjs');
+const { archiveClosed } = require('./tools/asar-closed.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const PTYF = 'src/main/pty.ts';
@@ -639,7 +640,7 @@ if (!WIN) {
     }
     const archive = path.join(dir, 'resources', 'app.asar');
     fs.mkdirSync(path.dirname(archive), { recursive: true });
-    await asar.createPackageWithOptions(src, archive, { unpack: '*.node' });
+    await archiveClosed(await asar.createPackageWithOptions(src, archive, { unpack: '*.node' }));
     assert.ok(fs.statSync(archive).isFile(), 'the archive is a file on disk');
     const entries = new Map(checker.asarFiles(checker.readAsarHeader(archive)));
     assert.deepEqual([...entries.keys()].sort(), ['package.json', 'out/main/index.js', `${NPP}/build/Release/conpty.node`, `${NPP}/lib/utils.js`].sort(), 'THE TOOL READS THE INDEX OF A REAL ARCHIVE');
