@@ -9,13 +9,14 @@
  * here. The rules:
  * - a child is one created at or after its parent (CreationDate);
  * - a pid recorded by a test is ours only while it still has the name it was recorded with and was
- *   created AT OR BEFORE the recorded birth. The birth `bornMs` is any time taken while ours was
- *   known to be alive: `Date.now()` right after the spawn, or bornNow() inside the process (both are
- *   always LATER than the CreationDate, by 8-37 ms and 62-317 ms measured). Exact, one-sided, no
- *   slack: a process created before bornMs that is alive now held that pid at bornMs, when ours did,
- *   which is impossible; so a LIVE row under the pid created after bornMs is a reuse (a stranger),
- *   and one created before it with another name means the record itself is wrong (`older`: callers
- *   that check a run fail loudly on it, it is a bug, not a stranger);
+ *   created no later than SPAWN_CLOCK_SKEW_MS after the recorded birth. The birth `bornMs` is any
+ *   time taken while ours was known to be alive: `Date.now()` right after the spawn, or bornNow()
+ *   inside the process. One-sided: a process created before bornMs that is alive now held that pid at
+ *   bornMs, when ours did, which is impossible; so a LIVE row under the pid created after bornMs is a
+ *   reuse (a stranger), and one created at or before it with another name means the record itself
+ *   is wrong (`older`: callers that check a run fail loudly on it, it is a bug, not a stranger).
+ *   The skew is there because bornMs and the CreationDate are read from two clocks, and they agree
+ *   only to about a millisecond (see SPAWN_CLOCK_SKEW_MS); there is no slack on the other side;
  * - just before a kill, the pid must still have the name and CreationDate it was found with.
  * Not on win32: no process table, so nothing can be verified and nothing is killed.
  */
@@ -28,6 +29,20 @@ const { psEnv } = require('./ps-env.cjs');
  * created (clock rounding; ours was created at most this long before bornMs). Never used for the root.
  */
 const ORPHAN_LEAD_MS = 1_000;
+/**
+ * FLAKE-OWN-PROCS-STILLOURS-NULL-LIVE-CHILD-108: how far AFTER `bornMs` the CreationDate of a live root may
+ * be and the root still be ours. Measured 2026-11-25 (200 children, 10 fresh node processes x 20, idle box):
+ * `Date.now()` right after spawn() minus the CreationDate was min -1 ms, median 0, max 4; 4 of 200 were -1 ms
+ * and 113 were 0. (An older note here said "always LATER, by 8-37 ms"; that no longer holds.) With no skew
+ * the rule called such a live child of ours a stranger: stillOurs answered null, and a caller that kills
+ * through this file then killed nothing, silently.
+ * Why 50: above one default Windows timer tick (15.6 ms), in case either reading is only tick-fine, with
+ * margin (about 3 ticks); the measured worst case is 1 ms.
+ * The cost: another process with the SAME image name that takes the pid within this long after the recorded
+ * birth reads as ours. For a record taken right after a spawn, our child would have to exit and its pid be
+ * freed and reused inside the window. Never raise it without a new measurement (a test pins the bound).
+ */
+const SPAWN_CLOCK_SKEW_MS = 50;
 /** @deprecated the old two-sided slack; kept so callers that import it still load. Same as ORPHAN_LEAD_MS. */
 const BIRTH_SLACK_MS = ORPHAN_LEAD_MS;
 
@@ -69,10 +84,13 @@ function treeOf(rows, parent) {
 /**
  * PURE: what of a recorded process is ours. `rec` = { pid, bornMs, name?, goneBy? } (the pid and
  * birth a test wrote down; `goneBy`, optional: a time by which ours was known to be gone).
- * - A live row under the pid created at or before bornMs, with the name: ours, with its tree.
- * - Created AFTER bornMs: the pid was reused, a `stranger`; nothing is ours, not its tree either.
+ * - A live row under the pid created no later than bornMs + SPAWN_CLOCK_SKEW_MS, with the name: ours,
+ *   with its tree.
+ * - Created later than that: the pid was reused, a `stranger`; nothing is ours, not its tree either.
  * - Created at or before bornMs with ANOTHER name: impossible for a stranger, so the record is wrong:
  *   `stranger` and `older: true`. Callers that judge a run must fail on it (a bug, never "nothing left").
+ * - ANOTHER name, created inside the skew after bornMs: a `stranger` with `older: false`. The two clocks
+ *   cannot order it against the birth, so it is not called a wrong record; it is not ours either way.
  * - No row (ours is gone): its orphans still are, the rows that name it as parent, created no earlier
  *   than ORPHAN_LEAD_MS before bornMs and, when `goneBy` is known, no later than it (a later process
  *   that took the pid after ours died can only have had its children after that).
@@ -80,8 +98,8 @@ function treeOf(rows, parent) {
 function ownTree(rows, rec, leadMs = ORPHAN_LEAD_MS) {
   const r = rows.find((x) => x.pid === rec.pid);
   if (r) {
-    if (r.created > rec.bornMs) return { root: null, tree: [], stranger: r, older: false };
-    if (rec.name && r.name.toLowerCase() !== String(rec.name).toLowerCase()) return { root: null, tree: [], stranger: r, older: true };
+    if (r.created > rec.bornMs + SPAWN_CLOCK_SKEW_MS) return { root: null, tree: [], stranger: r, older: false };
+    if (rec.name && r.name.toLowerCase() !== String(rec.name).toLowerCase()) return { root: null, tree: [], stranger: r, older: r.created <= rec.bornMs };
     return { root: r, tree: ruled([r, ...treeOf(rows, r)], 'own-tree') };
   }
   const tree = treeOf(rows, { pid: rec.pid, created: rec.bornMs - leadMs });
@@ -284,4 +302,4 @@ function killsNaming(pid, sinceMs = -Infinity) {
   } catch { return ''; }
 }
 
-module.exports = { runPowershell, ORPHAN_LEAD_MS, BIRTH_SLACK_MS, bornNow, parseRows, sameProcess, childrenOf, treeOf, ownTree, ownTreeOrThrow, cutAfter, stillOurs, readRec, killVerified, killOwnTree, processTable, lookupPids, stopScript, stopIfSame, powershellStarts, stopsNaming, killsNaming };
+module.exports = { runPowershell, ORPHAN_LEAD_MS, SPAWN_CLOCK_SKEW_MS, BIRTH_SLACK_MS, bornNow, parseRows, sameProcess, childrenOf, treeOf, ownTree, ownTreeOrThrow, cutAfter, stillOurs, readRec, killVerified, killOwnTree, processTable, lookupPids, stopScript, stopIfSame, powershellStarts, stopsNaming, killsNaming };
