@@ -49,7 +49,29 @@ test('ONBINARY-DROP: win32 ConPTY preserves the high coordinate only via string 
     'the Buffer mutant loses 0x85 at ConPTY UTF-8 decoding: it arrives as U+FFFD');
 });
 
-test('ONBINARY-DROP: POSIX real PTY receives the raw X10 bytes', { skip: process.platform === 'win32' }, async (t) => {
+// FLAKE-ONBINARY-PTY-CHILD-NO-ANSWER-RECUR-108. The bundled OpenConsole asks a start-up query and holds
+// the child's start until it is answered, or 3 s pass. The app answers it for every terminal. The helper
+// did not, so about 3 s of its 5 s were gone before the child existed, and under suite load the cell
+// above went red with 'PTY child did not answer' and no READY. The helper now answers as the app does.
+// What is pinned is the order of the steps and what the input socket was given, never a duration.
+test("ONBINARY-DROP: the helper answers OpenConsole's start-up query as the app does, before the child says READY", { skip: process.platform !== 'win32' }, async (t) => {
+  const { ptyBinaryInput } = loadTs('src/main/ptyBinaryInput.ts');
+  const { DA1_ANSWER } = loadTs('src/main/openConsoleHandshake.ts');
+  const node = consoleNode();
+  t.diagnostic(`PTY child: ${node.file} ${node.version} (from ${node.from})`);
+  let seen;
+  const bytes = await childBytes(ptyBinaryInput(X10_HIGH_COLUMN, 'win32'), { file: node.file, onHandshake: (h) => { seen = h; } });
+  assert.ok(seen, 'childBytes reports what it saw of the start-up handshake');
+  t.diagnostic(`handshake: ${JSON.stringify(seen)}`);
+  assert.equal(seen.looked, true, 'the default host is the bundled OpenConsole, where the query is looked for');
+  assert.deepEqual(seen.order, ['query', 'answer', 'ready', 'write', 'bytes'],
+    "the query is seen, the answer is written, then the child says READY, then the test's bytes go in and come back");
+  assert.equal(seen.inputAtReady, Buffer.byteLength(DA1_ANSWER),
+    "THE START-UP QUERY IS ANSWERED: when READY came the terminal's input socket had been given the answer and nothing else");
+  assert.deepEqual(bytes, [0x1b, 0x5b, 0x4d, 0x20, 0xc2, 0x85, 0x21], "the child's first stdin bytes are the test's, not the answer's");
+});
+
+test('ONBINARY-DROP: POSIX real PTY receives the raw X10 bytes',{ skip: process.platform === 'win32' }, async (t) => {
   const { ptyBinaryInput } = loadTs('src/main/ptyBinaryInput.ts');
   const node = consoleNode();
   t.diagnostic(`PTY child: ${node.file} ${node.version} (from ${node.from})`);
@@ -232,6 +254,8 @@ test("ONBINARY-DROP: a 'PTY child timed out' red carries the record of where the
   const FIELDS = [
     ['the head, and which call it was (the input says which terminal of a cell)', /^ {2}record, ms since the spawn: call \d+ in this process, input string 1b5b4d208521; /],
     ['the first chunk', /; first chunk \d+; /],
+    ['the first chunk in hex, and how much of it is shown', /; first chunk bytes [0-9a-f]+ \(\d+ of \d+ B\); /],
+    ['the start-up query: not looked for on the inbox host', /; start-up query not looked for \(host inbox\); /],
     ['READY seen', /; READY seen \d+; /],
     ['the write issued', /; write issued \d+; /],
     ['the write flushed, with the input socket counts', /; write flushed (\d+|none) \(input socket: \d+ B written, \d+ B queued\); /],
