@@ -107,9 +107,10 @@ test('cleanup that cannot finish FAILS the cell: a file held open past the budge
       assert.equal(fs.existsSync(dir), false, 'Node: the folder is gone');
     }
   } finally {
+    // In the finally, after the handle closes: a failed assert above must not leave the folder behind.
     fs.closeSync(fd);
+    assert.equal(await removeDir(dir), true, 'the folder goes once the file is closed');
   }
-  assert.equal(await removeDir(dir), true, 'the folder goes once the file is closed');
   assert.equal(ofs.existsSync(dir), false);
 });
 
