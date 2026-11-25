@@ -265,9 +265,9 @@ test('ONBINARY-DROP: a child that answers but says its stdout is no TTY is refus
 // this cell pins every field of it on a real child that times out.
 // How the child is made to time out, in this cell only: its prelude drops the script's one-shot stdin
 // listener (the byte counter of the record still reads), and makes the child's own timer 250 ms.
-// host 'inbox': it starts the child at once. On the bundled OpenConsole the helper's child starts about
-// 3 s after the spawn, and which of the two clocks wins there is what the record is for, so a cell on
-// that host could pin only one of the two names.
+// host 'inbox': the host this record was measured on, and the one where no start-up query is looked
+// for. (Until FLAKE-ONBINARY-PTY-CHILD-NO-ANSWER-RECUR-108 the helper's child on the bundled OpenConsole
+// started about 3 s after the spawn, so a cell on that host could pin only one of the two clocks' names.)
 const TIMES_OUT = "{ const once = process.stdin.once; process.stdin.once = function (name, ...rest) { return name === 'data' ? this : once.call(this, name, ...rest); };"
   + ' const real = setTimeout; globalThis.setTimeout = (fn) => real(fn, 250); }';
 // The exit in the record is the terminal's exit event as the helper's seal saw it. The helper settles
