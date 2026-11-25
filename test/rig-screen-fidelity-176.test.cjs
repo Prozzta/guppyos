@@ -20,27 +20,78 @@ const { startRig, sleep } = require('./mail-rig/driver.cjs');
 
 const ID = 'cx-1';
 
-const oneEnter = (echoGapMs) => async (t) => {
+// FLAKE-RIG176-STARVED-STUB-NO-ENTER-108: the timeline a red prints, in real ms after the `send`
+// call (T0). Read once, after the cell's own waits, from what the rig already keeps. The host's
+// diags carry the simulated clock, which does not move after T0, so one offset converts them.
+const timeline = async (rig, T0) => {
+  const show = (s) => JSON.stringify(String(s)).slice(0, 90);
+  const lines = [];
+  try {
+    const trace = await rig.call('ptyTrace', { id: ID });
+    const off = trace.sim - trace.real;
+    lines.push(`clock: last move ${trace.clockMovedReal - T0} ms from T0 (negative: before it, so the diag times are exact); newest echo the host saw: ${trace.echoSeen}`);
+    for (const o of (await rig.call('outcomes')).filter((x) => x.agentId === ID)) lines.push(`+${Math.round(o.at - T0)} outcome ${o.outcome.kind} ${o.outcome.detail ?? o.outcome.reason ?? ''}`);
+    for (const d of (await rig.call('diags')).filter((x) => x.agentId === ID && x.stage === 'screen-guard')) lines.push(`+${Math.round(d.at - off - T0)} reading ${show(d.why)}`);
+    for (const r of rig.transcript(ID).filter((x) => ['pty-input', 'enter-arrived', 'echo-written'].includes(x.kind))) {
+      lines.push(`+${r.t - T0} stub ${r.kind}${r.kind === 'pty-input' ? ` ${show(r.data)}` : ''}${r.seq !== undefined ? ` seq ${r.seq}` : ''}${r.held ? ' (held frame)' : ''}`);
+    }
+    for (const c of trace.chunks) {
+      const echo = /rig-echo-(\d+)/.exec(c.head);
+      lines.push(`+${c.real - T0} host got ${c.bytes} bytes${echo ? ` (echo ${echo[1]})` : ''} ${show(c.head)}`);
+    }
+  } catch (e) { lines.push(`timeline failed: ${String((e && e.stack) || e).slice(0, 300)}`); }
+  return lines.join('\n  ');
+};
+
+const oneEnter = (scenario) => async (t) => {
   const rig = await startRig(t);
-  await rig.setup([{ id: ID, flavour: 'codex', scenario: { echoLagMs: 5000, echoGapMs } }]);
+  await rig.setup([{ id: ID, flavour: 'codex', scenario }]);
+  const T0 = Date.now();
   await rig.call('send', { to: ID, subject: 'gap', body: 'hello' });
   const outcomes = async () => (await rig.call('outcomes')).filter((o) => o.agentId === ID).map((o) => o.outcome);
   for (let i = 0; i < 40 && !(await outcomes()).length; i += 1) { await rig.beat(); await sleep(1000); }
   for (let i = 0; i < 5; i += 1) { await rig.beat(); await sleep(1000); }
-  const sg = (await rig.call('diags')).filter((d) => d.agentId === ID && d.stage === 'screen-guard').map((d) => d.why);
-  const why = `outcomes ${JSON.stringify(await outcomes())}\n  screen-guard: ${sg.join(' ; ')}`;
   const enters = rig.transcript(ID).filter((r) => r.kind === 'pty-input').reduce((n, r) => n + (String(r.data).match(/\r/g) || []).length, 0);
+  const committed = (await outcomes()).some((o) => o.kind === 'COMMITTED');
+  const why = enters === 1 && committed ? '' : `outcomes ${JSON.stringify(await outcomes())}\n  timeline (real ms after the send):\n  ${await timeline(rig, T0)}`;
   assert.equal(enters, 1, `THE STUB RECEIVES EXACTLY ONE ENTER, got ${enters}\n  ${why}`);
-  assert.ok((await outcomes()).some((o) => o.kind === 'COMMITTED'), `COMMITTED\n  ${why}`);
+  assert.ok(committed, `COMMITTED\n  ${why}`);
 };
 
-test('RIG FIDELITY: a screen reading never shows the stub\'s text before its echo reached the host (one Enter, never a chase)', { timeout: 180_000 }, oneEnter(1000));
+// FLAKE-RIG176-STARVED-STUB-NO-ENTER-108: in both cells the 5 s lag is on the Enter alone
+// (echoLagFrom). On every chunk it also held back the staged TEXT's echo, to 9 s after the stage
+// write in the load cell, and the product erases text it cannot see about 10.8 s after that write
+// (the Codex Enter gap, then SCREEN_COMMIT_SLOW_BUDGET_MS, on the real clock). A starved host used
+// up the 1.8 s that was left: 0 Enters, ABORTED screen-not-verified:READY:empty-composer, which is
+// the product being right about a screen that never showed the text. Neither cell is about that.
+// This cell keeps its 1 s gap on EVERY chunk: composer.json ahead of the echo is its subject.
+test('RIG FIDELITY: a screen reading never shows the stub\'s text before its echo reached the host (one Enter, never a chase)', { timeout: 180_000 }, oneEnter({ echoLagMs: 5000, echoLagFrom: 'enter', echoGapMs: 1000 }));
 
 // RIG-176-LOAD-FLAKE (1.1.91): a starved stub stretched the 1 s gap past SUBMIT_VERIFY_WINDOW_MS
 // (2.5 s). The stub then printed the Enter's \r\n at once and the cleared composer a gap later,
 // a split no TUI makes, and WSG read the quiet as "Enter lost" and sent a second one. A 4 s
 // gap is that load, made certain: 5/5 runs got 2 Enters before the stub drew one frame per input.
-test('RIG FIDELITY load: an echo gap longer than the verify window (a starved stub) still gets ONE Enter: the stub draws the Enter and its cleared composer in one frame', { timeout: 180_000 }, oneEnter(4000));
+// The split is in the ENTER's frame, so the lag and the gap are on the Enter chunk alone
+// (echoLagFrom, echoGapFrom): the staged text is echoed at once and the Enter's frame is still
+// held 5 s + 4 s, well past the verify window.
+test('RIG FIDELITY load: an echo gap longer than the verify window (a starved stub) still gets ONE Enter: the stub draws the Enter and its cleared composer in one frame', { timeout: 180_000 }, oneEnter({ echoLagMs: 5000, echoLagFrom: 'enter', echoGapMs: 4000, echoGapFrom: 'enter' }));
+
+// FLAKE-RIG176-STARVED-STUB-NO-ENTER-108 (Jim 2e3540): the stub's Enter test alone, no rig. A \r
+// inside a bracketed paste is pasted text; the paste state and a marker that stdin split between
+// two chunks both carry over to the next chunk.
+test('RIG FIDELITY enter scan: only a \\r outside a bracketed paste is the Enter, across chunk boundaries', () => {
+  const { enterScanner } = require('./mail-rig/fake-agent.cjs');
+  let scan = enterScanner();
+  assert.deepEqual(['\x1b[200~line one', '\x1b[20', '1~'].map(scan), [false, false, false], 'a paste end split as ESC[20 + 1~ is no Enter');
+  assert.equal(scan('\r'), true, 'and the paste did end: the next \\r is the Enter');
+  scan = enterScanner();
+  assert.deepEqual(['\x1b[200~a\rb', 'c\rd'].map(scan), [false, false], 'a \\r inside a paste is no Enter, in the opening chunk or a later one');
+  assert.equal(scan('\x1b[201~\r'), true, 'a paste end followed by \\r in the same chunk IS the Enter');
+  scan = enterScanner();
+  assert.deepEqual(['\x1b[200~a\x1b[201', '~\r'].map(scan), [false, true], 'a paste end split before its ~, then \\r: the Enter');
+  assert.deepEqual(['[hive] check inbox', '\r', '\x15'].map(enterScanner()), [false, true, false], 'the wake as the product types it: plain text, the Enter, an erase');
+  assert.deepEqual(['\x1b', '\r'].map(enterScanner()), [false, true], 'a lone ESC is not held as a marker past the next chunk');
+});
 
 test('RIG FIDELITY n1: a received echo that fell out of the stub\'s window gives NO reading, never an empty composer', () => {
   const { screenDraftOf } = require('./mail-rig/screen-draft.cjs');
