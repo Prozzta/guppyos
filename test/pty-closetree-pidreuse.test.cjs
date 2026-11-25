@@ -92,8 +92,11 @@ test.after(async () => {
 
 /** A real terminal whose root idles. Gives the scenario its manager, id, root pid, the promise of
  *  node-pty's exit REPORT (the moment the product can know the root is gone) and of the ConPTY
- *  close; ends everything afterwards whatever happened. */
-async function withTerminal(Pty, scenario) {
+ *  close; ends everything afterwards whatever happened.
+ *  `order` forces the order of the exit report and the output socket's close: 'report-first',
+ *  'close-first', or 'natural' (whichever comes). `hooksAfterReport` is the harness before
+ *  FLAKE-PTY-CLOSETREE-EXITED-NATEXIT-ORDER-108, kept only for the order mutant below. */
+async function withTerminal(Pty, scenario, { order = 'natural', hooksAfterReport = false } = {}) {
   const m = new Pty();
   const owner = { isDestroyed: () => false, send: () => {} };
   const id = `ptpr-${++seq}`;
@@ -119,9 +122,44 @@ async function withTerminal(Pty, scenario) {
     const agent = proc._agent;
     const report = agent._$onProcessExit;
     const hooks = [];
-    agent._$onProcessExit = function onProcessExit(code) {
-      const out = report.call(this, code);
-      for (const h of hooks) h();   // in the same turn as the report, before anything else can run
+    // FLAKE-PTY-CLOSETREE-EXITED-NATEXIT-ORDER-108: the report and the output socket's close come in
+    // either order. When the close comes first, PTY-NATURAL-EXIT-JOIN
+    // (tools/patch-node-pty-root-handle.cjs) leaves 'exit' to the report, and the report emits it
+    // as its LAST step, inside the report. PtyManager drops the session on 'exit', so a hook run
+    // after the report finds no session in that order ('no pty'). So the hooks run at the one point
+    // that exists in both orders: the code is set and 'exit' has not been emitted. With the close
+    // first that is just before the exit the close left; with the report first it is just after
+    // the report ('exit' comes at the later close). Still the same turn as the report.
+    const sock = proc._socket;
+    let sockClosed = false;
+    sock.once('close', () => { sockClosed = true; });
+    let reportRan = false;
+    let seenOrder = null;
+    let joined = false;
+    if (order === 'report-first') {
+      // Hold the close's listeners (node-pty's among them) until the report has run.
+      const emit = sock.emit;
+      sock.emit = function holdClose(ev, ...a) {
+        if (ev === 'close' && !reportRan) { void reported.then(() => emit.call(sock, ev, ...a)); return true; }
+        return emit.call(this, ev, ...a);
+      };
+    }
+    let hooksRan = false;
+    const runHooks = () => { if (!hooksRan) { hooksRan = true; for (const h of hooks) h(); } };
+    agent._$onProcessExit = function onProcessExit(...args) {
+      if (order === 'close-first' && !sockClosed) {
+        // Hold the report until the close (and node-pty's close listener, registered first) has run.
+        const self = this;
+        sock.once('close', () => setImmediate(() => onProcessExit.apply(self, args)));
+        return undefined;
+      }
+      reportRan = true;
+      seenOrder = sockClosed ? 'close-first' : 'report-first';
+      const pending = this._guppyPendingExit;
+      joined = typeof pending === 'function';
+      if (joined && !hooksAfterReport) this._guppyPendingExit = function hooksThenExit() { runHooks(); pending(); };
+      const out = report.apply(this, args);
+      runHooks();   // report first: in the same turn as the report, before anything else can run
       onReport();
       return out;
     };
@@ -131,7 +169,7 @@ async function withTerminal(Pty, scenario) {
     proc.kill = (...a) => { closes += 1; onClose(); return rawClose(...a); };
     /** End the root for real. It is running, so node-pty holds its handle and the pid is its own. */
     const endRoot = () => { assert.equal(REAL.rootState(proc), 'running', 'the root is running when the scenario ends it'); realKill.call(process, root); };
-    return await scenario({ m, id, root, proc, reported, closed, endRoot, atReport: (h) => hooks.push(h), closes: () => closes });
+    return await scenario({ m, id, root, proc, reported, closed, endRoot, atReport: (h) => hooks.push(h), closes: () => closes, seen: () => ({ order: seenOrder, joined }) });
   } finally {
     reused.delete(root);
     answers = [];
@@ -156,18 +194,24 @@ const K = {
     assert.equal(sweepsOf(root), 2, `A ROOT THAT SURVIVED THE FIRST SWEEP IS SWEPT AGAIN: ${sweepsOf(root)} sweep(s) of a root that is still running`);
   }),
   /** The root died on its own; kill() arrives in the same turn as the exit report, before node-pty's
-   *  delayed 'exit' event has removed the session. Its pid is free for anyone. */
-  exited: (Pty) => withTerminal(Pty, async ({ m, id, root, reported, closed, endRoot, atReport, closes }) => {
+   *  'exit' event has removed the session. Its pid is free for anyone. Run under each order of the
+   *  report and the output close (FLAKE-PTY-CLOSETREE-EXITED-NATEXIT-ORDER-108). */
+  exited: (Pty, order, opts = {}) => withTerminal(Pty, async ({ m, id, root, reported, closed, endRoot, atReport, closes, seen }) => {
     let killed = null;
     atReport(() => { reused.add(root); killed = m.kill(id); });
     endRoot();
     await within(reported, "node-pty's exit report");
+    const s = seen();
+    assert.equal(s.order, order, `THE ORDER IS THE ONE FORCED: the report ran ${s.order}, the scenario forced ${order}`);
+    assert.equal(s.joined, order === 'close-first', `A CLOSE THAT CAME FIRST LEAVES THE EXIT TO THE REPORT (PTY-NATURAL-EXIT-JOIN), AND ONLY THEN: order ${order}, pending exit ${s.joined}`);
     assert.ok(killed && killed.ok, `kill() of a session whose root just exited: ${killed && killed.error}`);
     await within(closed, 'the ConPTY close');
     assert.equal(sweepsOf(root), 0, `A ROOT THAT ALREADY EXITED IS NOT SWEPT: its pid ${root} was free for any process, and taskkill /T /F was pointed at it`);
     assert.equal(closes(), 1, 'THE CONPTY IS STILL CLOSED ONCE when the sweep is skipped');
     assert.equal(m.closingTrees.size, 0, 'nothing is left waiting on a sweep that never ran');
-  }),
+  }, { order, ...opts }),
+  exitedReportFirst: (Pty) => K.exited(Pty, 'report-first'),
+  exitedCloseFirst: (Pty) => K.exited(Pty, 'close-first'),
   /** A terminal object that is not node-pty's ConPTY one: nothing binds its pid to its root. The
    *  first sweep is the kill itself and stays; a second one would rest on the pid alone. */
   unknown: async (Pty) => {
@@ -198,7 +242,8 @@ const K = {
 
 test('REUSED PID: after the first sweep ends the root, a process alive under its old pid is never swept', () => K.reuse(REAL.PtyManager));
 test('a root still running after the first sweep is swept once more before the close', () => K.survivor(REAL.PtyManager));
-test('a root that exited on its own is not swept at all, and its ConPTY is still closed once', () => K.exited(REAL.PtyManager));
+test('a root that exited on its own is not swept at all, and its ConPTY is still closed once (exit report first)', () => K.exitedReportFirst(REAL.PtyManager));
+test('a root that exited on its own is not swept at all, and its ConPTY is still closed once (output close first)', () => K.exitedCloseFirst(REAL.PtyManager));
 test('a terminal whose root cannot be told from its pid gets the one sweep and no second', () => K.unknown(REAL.PtyManager));
 test("rootState follows node-pty's exit report and trusts only the ConPTY agent", () => K.pin(REAL.PtyManager, REAL));
 
@@ -221,7 +266,7 @@ const MUTANTS = [
   { name: 'P2 the second sweep runs when the root state is unknown', edits: [[NO_HOLD, 'return repeat ? isAlive(s.proc.pid) : true;']],
     killer: 'unknown', dies: /NO SECOND SWEEP WITHOUT PROOF/ },
   { name: 'P3 a root that already exited is swept anyway', edits: [['    if (!mayNamePid(s, false)) { close(); return; }\n', '']],
-    killer: 'exited', dies: /A ROOT THAT ALREADY EXITED IS NOT SWEPT/ },
+    killer: 'exitedCloseFirst', dies: /A ROOT THAT ALREADY EXITED IS NOT SWEPT/ },
   { name: 'P4 rootState reads the exit report backwards', edits: [["return agent._exitCode === undefined ? 'running' : 'exited';", "return agent._exitCode === undefined ? 'exited' : 'running';"]],
     killer: 'pin', dies: /ROOT STATE PIN: a live ConPTY terminal/ },
   { name: 'P5 rootState trusts an agent that is not the ConPTY one', edits: [['agent._useConpty !== true || ', '']],
@@ -238,4 +283,15 @@ test('MUTANT CENSUS: every mutant applies once and dies at the assertion that na
       }, `${mu.name}: MUST DIE`);
     });
   }
+});
+
+// FLAKE-PTY-CLOSETREE-EXITED-NATEXIT-ORDER-108: the harness mutant. Hooks that run only after the
+// report (this file before the card) find the session already gone when the output closed first:
+// the report emitted the exit the close left, and PtyManager dropped the session. The red it gave
+// in a full suite (Electron leg, 329ffcd9), now forced every time.
+test('ORDER MUTANT: hooks run only after the report die with no pty when the output closed first', async () => {
+  await assert.rejects(() => K.exited(REAL.PtyManager, 'close-first', { hooksAfterReport: true }), (e) => {
+    assert.match(String(e && e.message), /kill\(\) of a session whose root just exited: no pty: ptpr-/, `the order mutant died for the wrong reason: ${e && e.message}`);
+    return true;
+  }, 'the order mutant MUST DIE');
 });
