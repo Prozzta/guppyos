@@ -223,14 +223,25 @@ test('CLEANUP KILL IDENTITY: endOwnHost refuses a pid that names a process which
 });
 
 test('CLEANUP KILL IDENTITY: endOwnHost ends a live console host of this process, and only under its real parent and birth', { skip: !WIN, timeout: 120_000 }, async (t) => {
-  const { PtyManager } = loadTs('src/main/pty.ts');
+  // A console host that is killed outright cannot end its program, and node-pty reports the exit
+  // when the host's pipe closes: the manager then forgets the session with the program still
+  // running, so PtyManager.kill can no longer reach it and this file would never end (the root is
+  // still waited on). The program therefore ends BY ITSELF when a flag file appears, and the cell
+  // waits for node-pty's own handle to say the root is gone. No pid is named to end it.
+  const { PtyManager, rootState } = loadTs('src/main/pty.ts');
   const node = consoleNode();
   const m = new PtyManager();
   const id = `conhost-leak-${process.pid}-${seq += 1}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'conhost-leak-'));
+  const flag = path.join(dir, 'end');
+  const program = `const fs = require('fs'); setInterval(() => { if (fs.existsSync(${JSON.stringify(flag)})) process.exit(0); }, 50)`;
   const born = Date.now();
   const before = await hostChildren();
-  assert.deepEqual(await m.spawn({ id, cwd: process.cwd(), command: node.file, args: ['-e', 'setInterval(() => {}, 1000)'], cols: 80, rows: 24 }), { ok: true });
+  assert.deepEqual(await m.spawn({ id, cwd: process.cwd(), command: node.file, args: ['-e', program], cols: 80, rows: 24 }), { ok: true });
+  const proc = m.sessions.get(id).proc;
+  let rootEnded = false;
   try {
+    assert.equal(rootState(proc), 'running', 'node-pty knows the program by handle and it is running');
     const mine = [...(await hostChildren())].filter(([pid]) => !before.has(pid));
     assert.equal(mine.length, 1, `the listing sees this terminal's console host: exactly one new host child, got ${JSON.stringify(mine)}`);
     const host = mine[0][0];
@@ -243,8 +254,16 @@ test('CLEANUP KILL IDENTITY: endOwnHost ends a live console host of this process
     let now = await hostChildren();
     for (let n = 0; n < LISTINGS && now.has(host); n += 1) now = await hostChildren();
     assert.equal(now.has(host), false, `the host is gone from the listing: pid ${host}`);
+    fs.writeFileSync(flag, '');
+    for (let n = 0; n < LISTINGS && rootState(proc) !== 'exited'; n += 1) await hostChildren();
+    rootEnded = rootState(proc) === 'exited';
+    assert.ok(rootEnded, `THE PROGRAM OUTLIVES ITS KILLED HOST: ${LISTINGS} listings after its end flag was written node-pty still has no exit for it`);
   } finally {
-    if (m.sessions.has(id)) m.kill(id);
+    // A red cell: the flag stays in place (with its folder) unless the program is known to be gone,
+    // so a program the manager has already forgotten still ends by itself.
+    try { fs.writeFileSync(flag, ''); } catch { /* the folder is gone only after the program is */ }
+    if (m.sessions.has(id)) { m.kill(id); rootEnded = true; }
+    if (rootEnded) fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
