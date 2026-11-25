@@ -22,6 +22,35 @@ function makeWritable(dir) {
   }
 }
 
+// Electron's original-fs recursive rmSync follows Windows junctions. Unlink them before either
+// removal attempt so a read-only file outside `dir` is neither changed nor used to block cleanup.
+function unlinkLinks(dir) {
+  let stat;
+  try { stat = fs.lstatSync(dir); } catch (error) {
+    if (error.code === 'ENOENT') return;
+    throw error;
+  }
+  if (stat.isSymbolicLink()) { fs.unlinkSync(dir); return; }
+  if (!stat.isDirectory()) return;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const file = path.join(dir, entry.name);
+    const child = fs.lstatSync(file);
+    if (child.isSymbolicLink()) fs.unlinkSync(file);
+    else if (child.isDirectory()) unlinkLinks(file);
+  }
+}
+
+function hasLinks(dir) {
+  let stat;
+  try { stat = fs.lstatSync(dir); } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+  if (stat.isSymbolicLink()) return true;
+  if (!stat.isDirectory()) return false;
+  return fs.readdirSync(dir, { withFileTypes: true }).some((entry) => hasLinks(path.join(dir, entry.name)));
+}
+
 /**
  * Removes a tree containing read-only files. Electron 45's rmSync reports EPERM for those files
  * on Windows, although current Node removes them. Retry once only after clearing their read-only
@@ -29,9 +58,13 @@ function makeWritable(dir) {
  */
 function rmTree(dir, options = {}) {
   const rmOptions = { recursive: true, force: true, ...options };
+  // Electron's original-fs follows a junction during recursive rmSync. For a tree containing one,
+  // clear owned files while lstat still protects its target, then unlink the junction before rmSync.
+  if (hasLinks(dir)) { makeWritable(dir); unlinkLinks(dir); }
   try { fs.rmSync(dir, rmOptions); } catch (error) {
     if (error.code !== 'EPERM') throw error;
     try { makeWritable(dir); } catch { throw error; }
+    unlinkLinks(dir);
     fs.rmSync(dir, rmOptions);
   }
 }

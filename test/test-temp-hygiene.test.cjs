@@ -164,27 +164,25 @@ test('REMOVEDIR: waits while something holds the folder, and gives up after its 
 // budgetMs 0 makes this one removal attempt only; it does not alter the production default budget.
 test('REMOVEDIR: a folder holding READ-ONLY files goes at the first try without following a junction', async (t) => {
   const { removeDir } = require('./tools/test-temp.cjs');
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ro-'));
-  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'ro-out-'));
+  const disk = process.versions.electron ? require('original-fs') : fs;
+  const dir = disk.mkdtempSync(path.join(os.tmpdir(), 'ro-'));
+  const outside = disk.mkdtempSync(path.join(os.tmpdir(), 'ro-out-'));
   const kept = path.join(outside, 'kept.txt');
   try {
-    fs.mkdirSync(path.join(dir, 'objects', '0b'), { recursive: true });
+    disk.mkdirSync(path.join(dir, 'objects', '0b'), { recursive: true });
     for (const file of [path.join(dir, 'top.txt'), path.join(dir, 'objects', '0b', 'deep')]) {
-      fs.writeFileSync(file, 'x'); fs.chmodSync(file, 0o444);
+      disk.writeFileSync(file, 'x'); disk.chmodSync(file, 0o444);
     }
-    fs.writeFileSync(kept, 'x'); fs.chmodSync(kept, 0o444);
-    try { fs.symlinkSync(outside, path.join(dir, 'outside'), 'junction'); } catch (error) { t.skip(`junction unavailable: ${error.message}`); return; }
+    disk.writeFileSync(kept, 'x'); disk.chmodSync(kept, 0o444);
+    try { disk.symlinkSync(outside, path.join(dir, 'outside'), 'junction'); } catch (error) { t.skip(`junction unavailable: ${error.message}`); return; }
     assert.equal(await removeDir(dir, { budgetMs: 0 }), true, 'TEMP REMOVE: read-only files do not stop removal');
-    assert.equal(fs.existsSync(dir), false, 'TEMP REMOVE: the folder is gone');
-    assert.equal(fs.readFileSync(kept, 'utf8'), 'x', 'TEMP REMOVE: a file behind the junction stays');
-    assert.equal(fs.statSync(kept).mode & 0o200, 0, 'TEMP REMOVE: it stays read-only too');
+    assert.equal(disk.existsSync(dir), false, 'TEMP REMOVE: the folder is gone');
+    assert.equal(disk.readFileSync(kept, 'utf8'), 'x', 'TEMP REMOVE: a file behind the junction stays');
+    assert.equal(disk.statSync(kept).mode & 0o200, 0, 'TEMP REMOVE: it stays read-only too');
   } finally {
     for (const d of [dir, outside]) {
-      if (!fs.existsSync(d)) continue;
-      for (const file of [path.join(d, 'top.txt'), path.join(d, 'objects', '0b', 'deep'), path.join(d, 'kept.txt')]) {
-        try { fs.chmodSync(file, 0o666); } catch { /* absent */ }
-      }
-      fs.rmSync(d, { recursive: true, force: true });
+      if (!disk.existsSync(d)) continue;
+      await removeDir(d, { budgetMs: 0 });
     }
   }
 });
