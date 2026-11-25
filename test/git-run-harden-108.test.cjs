@@ -30,6 +30,36 @@ test.after(() => rmTree(ROOT, { maxRetries: 10, retryDelay: 50 }));
 const raw = (cwd, ...args) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'core.autocrlf=false', ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 const fwd = (p) => p.replace(/\\/g, '/');
 
+/**
+ * One read through the claims snapshot runner, with a record of every program the read started.
+ * The runner answers null for a failed driver read, a failed start, its own time limit, a child
+ * error and a non-zero exit alike, and keeps no error text: `how` says which of them it was.
+ * Nothing is waited for here: a program the runner stopped at its limit shows as still running.
+ */
+async function worldRead(repo, args) {
+  const cp = require('node:child_process');
+  const real = { spawn: cp.spawn, execFile: cp.execFile };
+  const t0 = Date.now();
+  const kids = [];
+  const note = (via, child, program, options) => {
+    const k = { via, program, cwd: options && options.cwd, startMs: Date.now() - t0 };
+    child.once('error', (e) => { k.error = e.code || e.message; });
+    child.once('close', (code, signal) => { k.code = code; k.signal = signal; k.endMs = Date.now() - t0; });
+    kids.push(k);
+    return child;
+  };
+  cp.spawn = function spawn(program, a, options) { return note('spawn', real.spawn.apply(this, arguments), program, options); };
+  cp.execFile = function execFile(program, a, options) { return note('execFile', real.execFile.apply(this, arguments), program, options); };
+  let out;
+  try { out = await world.runGit(repo, args, undefined, 5000); }
+  finally { cp.spawn = real.spawn; cp.execFile = real.execFile; }
+  const ms = Date.now() - t0;
+  const one = (k) => `${k.via} ${k.program} in ${k.cwd} at ${k.startMs} ms, `
+    + (k.endMs === undefined ? 'still running when the read returned' : `ended at ${k.endMs} ms with code ${k.code} signal ${k.signal}`)
+    + (k.error ? `, error ${k.error}` : '');
+  return { out, kids, how: `the read returned ${out === null ? 'null' : typeof out} after ${ms} ms; it started ${kids.length} program(s): ${kids.map(one).join('; ')}` };
+}
+
 /** A repo with two commits that change package.json's version, and a marker path beside it. */
 function setup() {
   const base = fs.mkdtempSync(path.join(ROOT, 'case-'));
@@ -68,8 +98,9 @@ test('GIT-RUN-HARDEN-108: a status read does not run the repo\'s file-system mon
   assert.ok(!('error' in st), `getStatus answers (${st.error})`);
   assert.equal(c.ran(), false, 'git.ts getStatus ran the repo\'s core.fsmonitor program');
 
-  const out = await world.runGit(c.repo, ['status', '--porcelain'], undefined, 5000);
-  assert.equal(typeof out, 'string', 'the claims runner answers');
+  const read = await worldRead(c.repo, ['status', '--porcelain']);
+  const out = read.out;
+  assert.equal(typeof out, 'string', `the claims runner answers (${read.how})`);
   assert.equal(c.ran(), false, 'the claims snapshot runner ran the repo\'s core.fsmonitor program');
 });
 
@@ -211,8 +242,9 @@ test('GIT-RUN-HARDEN-108: a status read and a new worktree do not run a filter d
   assert.ok(!('error' in st), `getStatus answers (${st.error})`);
   assert.equal(c.ran(), false, 'git.ts getStatus ran the repo\'s filter clean program');
 
-  const out = await world.runGit(c.repo, ['status', '--porcelain'], undefined, 5000);
-  assert.equal(typeof out, 'string', 'the claims runner answers');
+  const read = await worldRead(c.repo, ['status', '--porcelain']);
+  const out = read.out;
+  assert.equal(typeof out, 'string', `the claims runner answers (${read.how})`);
   assert.equal(c.ran(), false, 'the claims snapshot runner ran the repo\'s filter clean program');
 
   const made = await git.addWorktree(c.repo, path.join(c.base, 'wt'), 'main');
@@ -382,8 +414,15 @@ for (const name of ['git.exe', 'git.com']) {
 
     const head = await world.runGit(c.repo, ['rev-parse', 'HEAD'], undefined, 5000);
     assert.equal(head === null ? null : head.trim(), headNow, `the claims snapshot runner ran the repo's ${name}, not git`);
-    const worldStatus = await world.runGit(c.repo, ['status', '--porcelain'], undefined, 5000);
-    assert.equal(typeof worldStatus, 'string', `the claims snapshot runner's status read ran the repo's ${name}, not git`);
+    const read = await worldRead(c.repo, ['status', '--porcelain']);
+    const worldStatus = read.out;
+    assert.equal(typeof worldStatus, 'string', `the claims snapshot runner's status read ran the repo's ${name}, not git (${read.how})`);
+    // What the cell is about, read off the starts themselves: the driver read and the status, each
+    // git's full path in git's own folder.
+    const own = gitSafe.gitProgram();
+    assert.ok(read.kids.length >= 2, `the status read did not start both the driver read and the status (${read.how})`);
+    assert.deepEqual(read.kids.filter((k) => k.program !== own.program || k.cwd !== own.cwd), [],
+      `the claims snapshot runner's status read did not start git by its full path, in git's own folder (${read.how})`);
     assert.equal(c.ran(), false, `the claims snapshot runner read the repo's filter drivers with the repo's ${name}, not git: the driver ran`);
   });
 }
