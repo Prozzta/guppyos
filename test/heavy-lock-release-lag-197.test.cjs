@@ -1083,12 +1083,14 @@ test('LIVE: a job still running keeps the slot (a sequential command after the f
 function standIn(t) {
   const c = spawn(process.execPath, ['-e', "process.stdin.on('data', () => process.stdout.write('pong'))"], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
   const exited = new Promise((r) => c.on('exit', (code, signal) => r({ code, signal })));
+  // A write into an ended stand-in fails with EPIPE, emitted on stdin; answers() reads it from the write's callback.
+  c.stdin.on('error', () => { /* read by answers() */ });
   t.after(() => { try { c.kill(); } catch { /* gone */ } });
   return { c, exited };
 }
-/** A fact, no timer: the stand-in answers a line (alive), or it exits (ended). */
+/** A fact, no timer: the stand-in answers a line (alive), or it exits or its stdin is broken (ended). */
 function answers(s) {
-  return new Promise((r) => { s.c.stdout.once('data', () => r(true)); s.exited.then(() => r(false)); try { s.c.stdin.write('ping'); } catch { r(false); } });
+  return new Promise((r) => { s.c.stdout.once('data', () => r(true)); s.exited.then(() => r(false)); try { s.c.stdin.write('ping', (e) => { if (e) r(false); }); } catch { r(false); } });
 }
 /** The stand-in's own row (pid, name, createdMs), read the way own-procs reads a process. */
 async function plantedRow(s) {
@@ -1103,7 +1105,9 @@ test('LIVE: a member kill never ends the process a reused pid now names (born la
   const now = await plantedRow(s);
   // The listed member had this pid and this name, and was born a minute before the stand-in: the pid was reused.
   const code = await killMember({ ...now, createdMs: now.createdMs - 60_000 });
-  assert.equal(await answers(s), true, `A PID THAT NO LONGER NAMES THE LISTED MEMBER IS NEVER KILLED (pid ${now.pid} was reused by a stand-in, and the kill ended it: ${JSON.stringify(await s.exited)}; kill exit ${code})`);
+  // The exit is read only for an ended stand-in: a live one never exits, so awaiting it in the message would hang the cell.
+  const alive = await answers(s), end = alive ? null : await s.exited;
+  assert.equal(alive, true, `A PID THAT NO LONGER NAMES THE LISTED MEMBER IS NEVER KILLED (pid ${now.pid} was reused by a stand-in, and the kill ended it: ${JSON.stringify(end)}; kill exit ${code})`);
   assert.equal(code, MEMBER_NOT_OURS, `the kill says it refused a pid that is not the listed member (exit ${code})`);
 });
 
@@ -1111,7 +1115,8 @@ test('LIVE: a member kill never ends a process of another name on the listed pid
   const s = standIn(t);
   const now = await plantedRow(s);
   const code = await killMember({ ...now, name: 'bash.exe' });
-  assert.equal(await answers(s), true, `A PID THAT NO LONGER NAMES THE LISTED MEMBER IS NEVER KILLED (pid ${now.pid} is ${now.name}, the member was bash.exe, and the kill ended it: ${JSON.stringify(await s.exited)}; kill exit ${code})`);
+  const alive = await answers(s), end = alive ? null : await s.exited;
+  assert.equal(alive, true, `A PID THAT NO LONGER NAMES THE LISTED MEMBER IS NEVER KILLED (pid ${now.pid} is ${now.name}, the member was bash.exe, and the kill ended it: ${JSON.stringify(end)}; kill exit ${code})`);
   assert.equal(code, MEMBER_NOT_OURS, `the kill says it refused a pid that is not the listed member (exit ${code})`);
 });
 
