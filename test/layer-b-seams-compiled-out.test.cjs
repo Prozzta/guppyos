@@ -16,6 +16,8 @@ const path = require('node:path');
 const { removeDir } = require('./tools/test-temp.cjs');
 const asar = require('@electron/asar');
 const { verify, verifyBundleText } = require('../scripts/verify-packaged-no-seams.cjs');
+// As tools/test-temp.cjs: under Electron the patched fs cannot remove a *.asar file.
+const ofs = process.versions.electron ? require('original-fs') : fs;
 
 const NORMAL = [
   'const LAYERB_SEAMS_BUILT = false;',
@@ -27,6 +29,17 @@ const NORMAL = [
 const SEAMS = NORMAL.replace('LAYERB_SEAMS_BUILT = false', 'LAYERB_SEAMS_BUILT = true')
   .replace('DEV_ROOT_ENV = ""', 'DEV_ROOT_ENV = "MUNDER_DEV_ROOT"').replace('DEV_HIDDEN_ENV = ""', 'DEV_HIDDEN_ENV = "MUNDER_HIDDEN"');
 
+// @electron/asar resolves createPackage with out.end(), the archive's write stream, before that stream
+// has closed its file handle. Under Electron a folder that holds a file still open cannot be removed
+// (ENOTEMPTY), so cleanup used to start against an open app.asar. pack() waits for 'close'.
+async function archiveClosed(ws) {
+  if (!ws || typeof ws.once !== 'function' || typeof ws.closed !== 'boolean') {
+    throw new Error('createPackage no longer resolves with its write stream: pack() cannot wait for the archive to close');
+  }
+  if (ws.closed) return;
+  await new Promise((res, rej) => { ws.once('close', res); ws.once('error', rej); });
+}
+
 async function pack(t, mainText) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md-noseams-'));
   t.after(async () => { try { asar.uncacheAll(); } catch { /* nothing cached */ } await removeDir(dir); });
@@ -35,7 +48,7 @@ async function pack(t, mainText) {
   fs.writeFileSync(path.join(src, 'package.json'), '{}');
   fs.writeFileSync(path.join(src, 'out', 'main', 'index.js'), mainText);
   const out = path.join(dir, 'app.asar');
-  await asar.createPackage(src, out);
+  await archiveClosed(await asar.createPackage(src, out));
   return out;
 }
 
@@ -53,6 +66,17 @@ test('a seams build FAILS, naming every problem', async (t) => {
   assert.equal(verifyBundleText(NORMAL.replace('const LAYERB_SEAMS_BUILT = false;', '')).ok, false, 'a missing constant fails closed');
   assert.equal(verifyBundleText(NORMAL + '\nconst x = typeof __LAYERB_SEAMS__;').ok, false, 'an unsubstituted define fails');
   assert.equal(verify(path.join(os.tmpdir(), 'no-such.asar')).ok, false);
+});
+
+// Red before the wait under Electron: ENOTEMPTY at round 0 (the archive was still open). Node removes a
+// folder with an open file, so this cell is green on the Node leg either way.
+test('pack() returns with the archive closed: the folder goes at the first rmSync, every round', async (t) => {
+  for (let i = 0; i < 20; i++) {
+    const dir = path.dirname(await pack(t, NORMAL));
+    try { asar.uncacheAll(); } catch { /* nothing cached */ }
+    assert.doesNotThrow(() => ofs.rmSync(dir, { recursive: true, force: true }), `round ${i}: the first rmSync`);
+    assert.equal(ofs.existsSync(dir), false, `round ${i}: the folder is gone`);
+  }
 });
 
 const BUNDLE = path.join(__dirname, '..', 'out', 'main', 'index.js');
