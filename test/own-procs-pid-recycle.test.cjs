@@ -80,6 +80,9 @@ test('a dead hung file: its orphans are killed, the older "child" and the recycl
 
 test('a dead root: orphans only from ORPHAN_LEAD_MS before its birth, and (goneBy known) none after it was gone', () => {
   assert.ok(own.ORPHAN_LEAD_MS > 0 && own.ORPHAN_LEAD_MS <= 1_000, `the orphan lead is bounded: ${own.ORPHAN_LEAD_MS} ms`);
+  // the live-root skew is bounded too: above the measured -1 ms, and never back toward the removed 2 s slack
+  assert.ok(Number.isInteger(own.SPAWN_CLOCK_SKEW_MS) && own.SPAWN_CLOCK_SKEW_MS > 0 && own.SPAWN_CLOCK_SKEW_MS <= 50,
+    `the spawn clock skew is bounded: ${own.SPAWN_CLOCK_SKEW_MS} ms`);
   const rows = [R(6000, 5000, T - own.ORPHAN_LEAD_MS, 'conhost.exe'), R(6005, 5000, T - own.ORPHAN_LEAD_MS - 1, 'svchost.exe')];
   assert.deepStrictEqual(own.ownTree(rows, { pid: 5000, bornMs: T }).tree.map((r) => r.pid), [6000]);
   // NIT-4: ours died, a LATER process took 5000, had children and died too: with goneBy, its children are not ours
@@ -102,8 +105,6 @@ test('a recorded pid now held by ANOTHER process (created after the birth): a st
 
 test('FLAKE-OWN-PROCS-STILLOURS-NULL-LIVE-CHILD-108: a live root created up to SPAWN_CLOCK_SKEW_MS after the recorded birth is ours; 1 ms more is a stranger', () => {
   const SKEW = own.SPAWN_CLOCK_SKEW_MS;
-  // the bound: above the measured -1 ms, and never back toward the removed 2 s slack
-  assert.ok(Number.isInteger(SKEW) && SKEW > 0 && SKEW <= 50, `the spawn clock skew is bounded: ${SKEW} ms`);
   const rec = { pid: 5000, bornMs: T, name: 'node.exe' };
   // measured: Date.now() right after spawn() can be 1 ms BEFORE the child's CreationDate
   const late1 = own.ownTree([R(5000, 4, T + 1), R(6000, 5000, T + 300, 'conhost.exe')], rec);
