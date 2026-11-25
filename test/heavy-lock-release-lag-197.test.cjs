@@ -492,13 +492,14 @@ async function liveRelease(t, o) {
   // .NET cold start is not paid inside a hook's wait). This did not: on a loaded Electron leg the cold helper missed the
   // create's 2.5 s deadline, the job was never held, the lock never heard of it, and every cell read the run as the product's.
   // Warm it the product's way and wait for that first answer (its own start budget), before the slot is taken.
-  if (typeof jobs.warm === 'function') {
-    jobs.warm();
-    const upBy = Date.now() + (Cm.HEAVY_JOB_START_MS ?? 12_000);
-    let up;
-    while (!(up = rows.find((r) => r.action === 'helper-start')) && Date.now() < upBy) await new Promise((r) => setTimeout(r, 25));
-    assert.ok(up && up.ok === true, `THE HELPER ANSWERS ITS WARM-UP BEFORE THE CALL (${up ? JSON.stringify(up) : 'no helper-start row'})`);
-  }
+  // No fallback for a renamed warm() or start budget: that is a loud red here, never a quiet cold path.
+  assert.equal(typeof jobs.warm, 'function', 'HeavyJobs.warm exists');
+  assert.equal(typeof Cm.HEAVY_JOB_START_MS, 'number', 'HEAVY_JOB_START_MS exists');
+  jobs.warm();
+  const upBy = Date.now() + Cm.HEAVY_JOB_START_MS;
+  let up;
+  while (!(up = rows.find((r) => r.action === 'helper-start')) && Date.now() < upBy) await new Promise((r) => setTimeout(r, 25));
+  assert.ok(up && up.ok === true, `THE HELPER ANSWERS ITS WARM-UP BEFORE THE CALL (${up ? JSON.stringify(up) : 'no helper-start row'})`);
   assert.equal(lock.acquire(AGENT, BENCH, 'bash cut.sh', 'call-1', true).acquired, true);
   // FLAKE-HEAVY-LOCK-LATE-MEMBER-RECUR-ELECTRON-108: o.lateMember makes the body itself (a member that stamps its own start and end).
   const member = o.lateMember ? lateMemberFiles(o.lateMember) : null;
