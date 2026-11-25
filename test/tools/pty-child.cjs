@@ -40,6 +40,8 @@
  * ('PTY child did not answer' with no READY, 2026-11-25, an Electron suite leg). It now answers as the
  * app does, with the app's own startupHandshake and DA1_ANSWER, on the bundled OpenConsole only (the
  * other hosts send no query). No clock is changed: the 5 s and the child's 3 s are as before.
+ * The app looks for the query in its first 8 chunks only; this helper looks until the child's first
+ * output, with no chunk cap. That is a superset, and the answer is still given once.
  * An answer that reaches OpenConsole after its 3 s is not harmless: it is passed to the child as typed
  * input, and the child's first stdin chunk is then the answer, not the test's bytes. That case has its
  * own name ('read the start-up answer as typed input') and is never resolved as the child's bytes.
@@ -365,7 +367,8 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
         if (step.answer) {
           hs.query = at(); order.push('query');
           // As the app does (PtyManager.spawn): the one answer, in the turn the query is read.
-          proc.write(DA1_ANSWER);
+          // The app guards this write too: a throw here is a named red, not an uncaught exception.
+          try { proc.write(DA1_ANSWER); } catch (e) { finish(named(`PTY start-up answer write failed: ${e && e.message}`)); return; }
           hs.answer = at(); order.push('answer');
         }
       }
