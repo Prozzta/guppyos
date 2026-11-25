@@ -9,7 +9,8 @@ require('./tools/mutant-runner-helper.cjs').gate(__filename);
  * ParentProcessId alone, and process.kill'ed it (it survived because it runs elevated). Fake process
  * tables here: an OLDER "child" and a RECYCLED grandchild are ignored and never killed; a pid that
  * changed hands between the snapshot and the kill is not killed. Jim's SHOULDs (audit of e9c99e66):
- * the recorded birth is an exact one-sided rule (no slack), and the pin covers all of test/.
+ * the recorded birth is a one-sided rule, and the pin covers all of test/. Its only slack is the bounded
+ * SPAWN_CLOCK_SKEW_MS after the birth (FLAKE-OWN-PROCS-STILLOURS-NULL-LIVE-CHILD-108).
  */
 const test = require('node:test');
 const assert = require('node:assert');
@@ -94,12 +95,39 @@ test('a recorded pid now held by ANOTHER process (created after the birth): a st
   const r = own.killOwnTree({ pid: 5000, bornMs: T, name: 'node.exe' }, { table: () => table, ...d });
   assert.deepStrictEqual(d.kills, [], 'not the stranger, and not the stranger\'s children');
   assert.strictEqual(r.stranger.name, 'HWiNFO64.EXE');
-  // a SAME-image reuse 1 ms after the birth: a stranger too (the old 2 s slack called it ours)
-  const twin = own.ownTree([R(5000, 4, T + 1)], { pid: 5000, bornMs: T, name: 'node.exe' });
+  // a SAME-image reuse just past the clock skew after the birth: a stranger too (the old 2 s slack called it ours)
+  const twin = own.ownTree([R(5000, 4, T + own.SPAWN_CLOCK_SKEW_MS + 1)], { pid: 5000, bornMs: T, name: 'node.exe' });
   assert.deepStrictEqual([twin.tree, twin.older], [[], false]);
 });
 
-test('the birth rule is exact and one-sided: created at or before bornMs is ours, however long before', () => {
+test('FLAKE-OWN-PROCS-STILLOURS-NULL-LIVE-CHILD-108: a live root created up to SPAWN_CLOCK_SKEW_MS after the recorded birth is ours; 1 ms more is a stranger', () => {
+  const SKEW = own.SPAWN_CLOCK_SKEW_MS;
+  // the bound: above the measured -1 ms, and never back toward the removed 2 s slack
+  assert.ok(Number.isInteger(SKEW) && SKEW > 0 && SKEW <= 50, `the spawn clock skew is bounded: ${SKEW} ms`);
+  const rec = { pid: 5000, bornMs: T, name: 'node.exe' };
+  // measured: Date.now() right after spawn() can be 1 ms BEFORE the child's CreationDate
+  const late1 = own.ownTree([R(5000, 4, T + 1), R(6000, 5000, T + 300, 'conhost.exe')], rec);
+  assert.deepStrictEqual([late1.root && late1.root.pid, late1.tree.map((r) => r.pid), late1.stranger], [5000, [5000, 6000], undefined],
+    'created 1 ms after the recorded birth: ours, with its tree');
+  assert.strictEqual(own.stillOurs(rec, { table: () => [R(5000, 4, T + 1)] }).pid, 5000, 'stillOurs: created 1 ms after the birth is ours');
+  const edge = own.ownTree([R(5000, 4, T + SKEW)], rec);
+  assert.deepStrictEqual([edge.root && edge.root.pid, edge.stranger], [5000, undefined], `created exactly ${SKEW} ms after the birth: still ours (<=)`);
+  const past = own.ownTree([R(5000, 4, T + SKEW + 1), R(6000, 5000, T + SKEW + 300, 'conhost.exe')], rec);
+  assert.deepStrictEqual([past.root, past.tree, past.older, past.stranger.pid], [null, [], false, 5000],
+    `created ${SKEW + 1} ms after the birth: a stranger, not older, and its children are not ours`);
+  assert.strictEqual(own.stillOurs(rec, { table: () => [R(5000, 4, T + SKEW + 1)] }), null, 'stillOurs: just past the skew is null');
+  const d = deps([R(5000, 4, T + SKEW + 1)]);
+  own.killOwnTree(rec, { table: () => [R(5000, 4, T + SKEW + 1)], ...d });
+  assert.deepStrictEqual(d.kills, [], 'just past the skew: nothing is killed');
+  // ANOTHER name inside the skew: never ours, and not called a wrong record (the clocks cannot order it)
+  const other = own.ownTree([R(5000, 4, T + 1, 'HWiNFO64.EXE')], rec);
+  assert.deepStrictEqual([other.root, other.tree, other.older, other.stranger.name], [null, [], false, 'HWiNFO64.EXE']);
+  assert.doesNotThrow(() => own.ownTreeOrThrow([R(5000, 4, T + 1, 'HWiNFO64.EXE')], rec), 'another name inside the skew is a stranger, not an error');
+  // ...and AT the birth with another name it is still the wrong record
+  assert.strictEqual(own.ownTree([R(5000, 4, T, 'HWiNFO64.EXE')], rec).older, true);
+});
+
+test('the birth rule is one-sided: created at or before bornMs is ours, however long before', () => {
   for (const created of [T, T - 37, T - 317, T - 5_000, T - 3600_000]) {
     const t = own.ownTree([R(5000, 4, created)], { pid: 5000, bornMs: T, name: 'node.exe' });
     assert.deepStrictEqual(t.tree.map((r) => r.pid), [5000], `created ${T - created} ms before the birth: ours`);
@@ -116,7 +144,8 @@ test('an OLDER process under the pid with another name cannot be a stranger: the
   const t = own.ownTree(rows, { pid: 5000, bornMs: T, name: 'node.exe' });
   assert.deepStrictEqual([t.tree, t.older, t.stranger.name], [[], true, 'HWiNFO64.EXE']);
   assert.throws(() => own.ownTreeOrThrow(rows, { pid: 5000, bornMs: T, name: 'node.exe' }), /BEFORE the recorded birth/);
-  assert.doesNotThrow(() => own.ownTreeOrThrow([R(5000, 4, T + 9)], { pid: 5000, bornMs: T, name: 'node.exe' }), 'a real reuse is a stranger, not an error');
+  assert.doesNotThrow(() => own.ownTreeOrThrow([R(5000, 4, T + own.SPAWN_CLOCK_SKEW_MS + 1)], { pid: 5000, bornMs: T, name: 'node.exe' }), 'a real reuse is a stranger, not an error');
+  assert.deepStrictEqual(own.ownTreeOrThrow([R(5000, 4, T + own.SPAWN_CLOCK_SKEW_MS + 1)], { pid: 5000, bornMs: T, name: 'node.exe' }).tree, [], '...and nothing of it is ours');
   // test-runner-glob's checks go through it: never an empty, vacuous list on a wrong record
   const glob = readSource('test/test-runner-glob.test.cjs');
   assert.match(glob, /function leftBehind\(rec\) \{\s*const \{ tree \} = own\.ownTreeOrThrow\(own\.processTable\(\), rec\);/);
@@ -317,8 +346,9 @@ test('own-procs, real (win32): kills a tree of TWO children it started, and not 
     const r = own.killVerified(rows);
     assert.strictEqual(r.attempted.length, 2);
     await Promise.all([a.exit, b.exit]);
-    // Date.now() right after the spawn is ours under the exact rule (no slack)
-    assert.strictEqual(own.stillOurs(keep.rec).pid, keep.c.pid, 'the spawner\'s Date.now() is at or after the CreationDate');
+    // Date.now() right after the spawn is ours: it can read up to a few ms BEFORE the CreationDate (measured
+    // -1 ms), which the bounded SPAWN_CLOCK_SKEW_MS covers
+    assert.strictEqual(own.stillOurs(keep.rec).pid, keep.c.pid, 'the spawner\'s Date.now() is within the clock skew of the CreationDate');
     // the pid of a live process, recorded with a birth BEFORE it was created: a reused pid, never killed
     const k = own.killOwnTree({ ...keep.rec, bornMs: keep.rec.bornMs - 3600_000 });
     assert.deepStrictEqual(k.attempted, []);
