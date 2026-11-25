@@ -32,6 +32,19 @@
  * 'exit N code N' and 'exit none code none' are legal records (the second was seen on 2026-11-23, an
  * Electron suite leg). The teardown stamps say where the time went then: when the child was ended by
  * its pid, when the terminal's kill was called, and when the conout worker had gone.
+ *
+ * FLAKE-ONBINARY-PTY-CHILD-NO-ANSWER-RECUR-108, the start-up answer. The bundled OpenConsole asks a
+ * start-up query (DA1) and does not start the child until an answer comes or 3 s pass (see
+ * src/main/openConsoleHandshake.ts). The app answers it for every terminal. This helper did not: about
+ * 3 s of its 5 s were gone before the child existed, and on a loaded machine the rest was not enough
+ * ('PTY child did not answer' with no READY, 2026-11-25, an Electron suite leg). It now answers as the
+ * app does, with the app's own startupHandshake and DA1_ANSWER, on the bundled OpenConsole only (the
+ * other hosts send no query). No clock is changed: the 5 s and the child's 3 s are as before.
+ * An answer that reaches OpenConsole after its 3 s is not harmless: it is passed to the child as typed
+ * input, and the child's first stdin chunk is then the answer, not the test's bytes. That case has its
+ * own name ('read the start-up answer as typed input') and is never resolved as the child's bytes.
+ * The record says when the query was seen and answered, what the input socket had been given at READY,
+ * and the first chunk in hex, so a red with no READY can tell 'not answered' from 'answered, no child'.
  */
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -42,7 +55,8 @@ const loadTs = require('../load-ts.cjs');
 const { armEarlyKill } = loadTs('src/main/pty.ts');
 const { holdRoot, rootHandoff } = loadTs('src/main/procIdentity.ts');
 // The app's own reader of OpenConsole's start-up query (loaded, not copied: one rule for both).
-const { startupHandshake } = loadTs('src/main/openConsoleHandshake.ts');
+const { startupHandshake, DA1_ANSWER } = loadTs('src/main/openConsoleHandshake.ts');
+const ANSWER_BYTES = [...Buffer.from(DA1_ANSWER, 'utf8')];
 
 /**
  * From the kill to the conout worker's exit node-pty takes 1 s (its flush interval). On the inbox
@@ -190,8 +204,8 @@ function electronExe() {
  *   test that asks for it says why.
  * @param opts.onOwnerCheck inbox host only: called at the close with what ownerConsole() said
  * @param opts.onHandshake called once, when the call ends (green or red), with what the helper saw of
- *   the start-up handshake: { looked, order, query, inputAtReady, firstChunk }. `order` is the steps
- *   in the order they were seen ('query', 'ready', 'write', 'bytes'), with no times
+ *   the start-up handshake: { looked, order, query, answer, inputAtReady, firstChunk }. `order` is the steps
+ *   in the order they were seen ('query', 'answer', 'ready', 'write', 'bytes'), with no times
  *   in it; `inputAtReady` is what the terminal's input socket had been given when READY was seen.
  */
 function childBytes(input, { file = process.execPath, env = process.env, onSpawn, prelude = '', host = 'openconsole', onOwnerCheck, onHandshake } = {}) {
@@ -235,7 +249,7 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
     const torn = { pidKill: null, termKill: null, workerGone: null };
     // The start-up handshake (see the file header). Looked for on the bundled OpenConsole only: the
     // other hosts send no such query. `order` holds the steps as they were seen, with no times.
-    const hs = { looked: process.platform === 'win32' && !inbox, pending: process.platform === 'win32' && !inbox, query: null, inputAtReady: null };
+    const hs = { looked: process.platform === 'win32' && !inbox, pending: process.platform === 'win32' && !inbox, query: null, answer: null, inputAtReady: null };
     const order = [];
     let firstChunk = null;
     // node-pty's write takes no callback. Its input socket's queue is read instead: a length of 0
@@ -263,7 +277,7 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
         + ` call ${call} in this process, input ${Buffer.isBuffer(input) ? 'Buffer' : typeof input} ${hex};`
         + ` first chunk ${show(stamp.first)}; first chunk bytes ${firstChunk === null ? 'none' : `${firstChunk.hex} (${firstChunk.shown} of ${firstChunk.length} B)`};`
         + (hs.looked
-          ? ` start-up query seen ${show(hs.query)}; input socket at READY ${hs.inputAtReady === null ? 'none' : `${hs.inputAtReady} B`};`
+          ? ` start-up query seen ${show(hs.query)}; answer written ${show(hs.answer)}; input socket at READY ${hs.inputAtReady === null ? 'none' : `${hs.inputAtReady} B`};`
           : ` start-up query not looked for (host ${inbox ? 'inbox' : process.platform});`)
         + ` READY seen ${show(stamp.ready)}; write issued ${show(stamp.write)};`
         + ` write flushed ${show(stamp.flushed)}${inSocket ? ` (input socket: ${inSocket.bytesWritten} B written, ${inSocket.writableLength} B queued)` : ' (no input socket to read)'};`
@@ -295,7 +309,7 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
       // The stall still open now counts too: a tick that was due did not run before this.
       noteGap();
       clearInterval(ticker);
-      if (onHandshake) onHandshake({ looked: hs.looked, order: [...order], query: hs.query, inputAtReady: hs.inputAtReady, firstChunk: firstChunk && firstChunk.hex });
+      if (onHandshake) onHandshake({ looked: hs.looked, order: [...order], query: hs.query, answer: hs.answer, inputAtReady: hs.inputAtReady, firstChunk: firstChunk && firstChunk.hex });
       if (!inbox) { close(error, value); return; }
       // NODEPTY-CONSOLE-LIST-KILL-SIBLINGS: on the inbox conhost node-pty's kill ends every process
       // on the console of the child's pid. An electron.exe child is on THIS test file's console, the
@@ -348,7 +362,12 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
       if (hs.pending) {
         const step = startupHandshake(String(data));
         hs.pending = step.pending;
-        if (step.answer) { hs.query = at(); order.push('query'); }
+        if (step.answer) {
+          hs.query = at(); order.push('query');
+          // As the app does (PtyManager.spawn): the one answer, in the turn the query is read.
+          proc.write(DA1_ANSWER);
+          hs.answer = at(); order.push('answer');
+        }
       }
       output += data;
       if (stamp.ready === null && output.includes('READY')) {
@@ -360,6 +379,15 @@ function childBytes(input, { file = process.execPath, env = process.env, onSpawn
       noteFlushed();
       const hit = /BYTES:(\[[^\n]*\])/.exec(output);
       if (hit && stamp.bytes === null) { stamp.bytes = at(); order.push('bytes'); }
+      // A late answer (after OpenConsole's 3 s) is typed into the child: its first chunk is then the
+      // answer, or came before this call wrote anything. Named, never resolved as the child's bytes.
+      if (hit && hs.answer !== null && !ended) {
+        const got = JSON.parse(hit[1]);
+        const isAnswer = ANSWER_BYTES.every((b, i) => got[i] === b);
+        if (isAnswer || !wrote) {
+          finish(named(`PTY child read the start-up answer as typed input (the answer reached OpenConsole after its 3 s wait): its first stdin bytes are ${Buffer.from(got).toString('hex')}, ${wrote ? 'which start with the answer' : 'read before the test wrote any'}`));
+        }
+      }
       // Asserted, not assumed: the child itself says its stdout and stdin are the console.
       if (hit && !output.includes('READY:true')) finish(new Error(`PTY child is not on the console (its stdout/stdin isTTY is not true): ${output}`));
       if (hit) finish(null, JSON.parse(hit[1]));
