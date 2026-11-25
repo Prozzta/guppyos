@@ -476,6 +476,14 @@ async function settleTasks(hive) {
   await Promise.all([...hive.authorityRefreshes.values()]);
   await hive.drainReads();
 }
+/** FLAKE-LAG-SYNC-IO-ARCHIVE-CATCHUP-OVERTAKEN-108: the revive's own write re-arms the folder watcher
+ *  and the missed-watch fallback (AUTHORITY_FALLBACK_MS). The write's stat key is unproven (changed
+ *  within STAT_RACY_MS), so the fallback's first tick re-reads tasks.json; a tick after the race was
+ *  counted as the reader's read (3, not 2). Settle again inside after(), where no read is counted. */
+async function reviveO1(hive) {
+  assert.ok(await hive.patchTask('O1', { notes: 'late' }));
+  await settleTasks(hive);
+}
 const jsonl = (calls) => calls.filter((c) => /\.jsonl$/.test(c));
 
 test('archive: readCardsAsync reads tasks.json, the archive and task-meta.json with no synchronous fs, and answers as readCards', async (t) => {
@@ -503,7 +511,7 @@ test('archive: a revive that lands while readCardsAsync is reading is the last w
   // tasks.json is read (O1 not in it); then the revive moves O1 back to hot and tombstones it in
   // the archive. Hot-before plus archive-after would have O1 nowhere.
   await settleTasks(hive);
-  const { result, fired } = await during('readFile', (p) => p.endsWith('tasks.json'), async () => { assert.ok(await hive.patchTask('O1', { notes: 'late' })); },
+  const { result, fired } = await during('readFile', (p) => p.endsWith('tasks.json'), () => reviveO1(hive),
     () => derived.readCardsAsync(root));
   assert.equal(fired, 2, 'overtaken once, then read again');
   assert.deepEqual(result, derived.readCards(root));
@@ -657,7 +665,7 @@ test('archive: the mail-card catch-up lists the registry\'s card ids through its
   assert.deepEqual(result, sync);
   // A revive between the hot read and the archive read: read again, not O1 lost.
   await settleTasks(hive);
-  const raced = await during('readFile', (p) => p.endsWith('tasks.json'), async () => { assert.ok(await hive.patchTask('O1', { notes: 'late' })); },
+  const raced = await during('readFile', (p) => p.endsWith('tasks.json'), () => reviveO1(hive),
     () => drive(mailCards.registryCardIdsSteps(root)));
   assert.equal(raced.fired, 2, 'overtaken once, then read again');
   assert.deepEqual([...raced.result].sort(), ['L1', 'O1', 'O2']);
