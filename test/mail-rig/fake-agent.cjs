@@ -151,17 +151,33 @@ class FakeAgent {
     // MAIL-RIG-G1-NO-ECHO-108 echo-hold seam: with scenario.echoHold the stub reads NO stdin chunk
     // (so it echoes nothing) until the 'echo-release' cue, then reads them all in order. A hold on
     // an event, not a lag in ms: a test can state "the keys are not on the screen yet" as a fact.
+    //
+    // FLAKE-RIG176-STARVED-STUB-NO-ENTER-108: scenario.echoLagFrom = 'enter' gives the lag only to
+    // a chunk that carries the submitting Enter, and scenario.echoGapFrom = 'enter' does the same
+    // for echoGapMs. Both are off by default. Lag and gap on the staged TEXT put its echo seconds
+    // after the stage write, inside reach of the product's 10 s commit budget on a starved host;
+    // on the Enter alone they still queue the Enter behind the echo, which is what the cells test.
+    // Whether a chunk carries the Enter, and so its lag and its gap, is decided HERE, as the chunk
+    // arrives and in arrival order, and travels with the chunk into onInput. Nothing is read at
+    // processing time, when a later chunk may already have arrived.
     this.echoHeld = this.scenario.echoHold ? [] : null;
+    const carriesEnter = enterScanner();
+    const gapFor = (enter) => (this.scenario.echoGapFrom === 'enter' && !enter ? 0 : Number(this.scenario.echoGapMs) || 0);
+    this.gapFor = gapFor;
     let lagged = 0; let lastDue = 0;
     process.stdin.on('data', (d) => {
-      if (this.echoHeld) { this.echoHeld.push(d); return; }
-      const lag = Number(this.scenario.echoLagMs) || 0;
+      const enter = carriesEnter(d);
+      const keyed = this.scenario.echoLagFrom === 'enter' || this.scenario.echoGapFrom === 'enter';
+      if (keyed && enter) this.rec('enter-arrived', {});
+      if (this.echoHeld) { this.echoHeld.push({ d, enter }); return; }
+      const lag = this.scenario.echoLagFrom === 'enter' && !enter ? 0 : Number(this.scenario.echoLagMs) || 0;
       const limit = this.scenario.echoLagChunks === undefined ? Infinity : Number(this.scenario.echoLagChunks);
-      const after = Number(this.scenario.echoLagAfterMs) || 0;
+      const after = this.scenario.echoLagFrom === 'enter' && !enter ? 0 : Number(this.scenario.echoLagAfterMs) || 0;
       const due = Math.max(Date.now() + (lag > 0 && lagged < limit ? lag : after), lastDue);
       if (lag > 0 && lagged < limit) lagged += 1;
       lastDue = due;
-      if (due <= Date.now()) this.onInput(d); else setTimeout(() => this.onInput(d), due - Date.now());
+      const how = { gap: gapFor(enter) };
+      if (due <= Date.now()) this.onInput(d, how); else setTimeout(() => this.onInput(d, how), due - Date.now());
     });
     process.stdin.resume();
     this.out(`fake ${this.flavour} agent ${this.agentId}\r\n`);
@@ -217,7 +233,8 @@ class FakeAgent {
 
   // ————————————————————————————————————————————————————————————— the terminal
 
-  onInput(d) {
+  // `how.gap` is this chunk's echo gap, decided by the stdin handler when the chunk arrived.
+  onInput(d, how) {
     this.rec('pty-input', { data: d });
     if (this.hung) return;
     // RIG-176-LOAD-FLAKE (1.1.91): with echoGapMs, EVERYTHING this input makes the stub print
@@ -225,7 +242,8 @@ class FakeAgent {
     // queues behind it, as a TUI draws one frame. Before, the \r\n went out at once and the
     // cleared composer a gap later: a new output generation with our text still shown, which
     // a starved stub stretched past SUBMIT_VERIFY_WINDOW_MS into a false "Enter lost" proof.
-    const gap = Number(this.scenario.echoGapMs) || 0;
+    const gap = how ? how.gap : Number(this.scenario.echoGapMs) || 0;
+    const keyed = this.scenario.echoLagFrom === 'enter' || this.scenario.echoGapFrom === 'enter';
     if (gap > 0 && !this.held) this.held = [];
     let s = d;
     while (s.length) {
@@ -260,9 +278,14 @@ class FakeAgent {
           const all = (this.held || []).join('');
           this.held = null; this.heldTimer = null;
           this.out(all);
+          if (keyed) this.rec('echo-written', { seq: this.echoSeq, held: true });
         }, gap);
       }
-    } else this.out(echo);
+    } else {
+      const behind = !!this.held;   // a held frame is still out: out() queues this echo behind it
+      this.out(echo);
+      if (keyed && !behind) this.rec('echo-written', { seq: this.echoSeq });
+    }
   }
 
   submit() {
@@ -338,7 +361,7 @@ class FakeAgent {
       case 'echo-release': {
         const q = this.echoHeld;
         if (!q) return;
-        setTimeout(() => { this.echoHeld = null; for (const d of q) this.onInput(d); }, Number(cue.afterMs) || 0);
+        setTimeout(() => { this.echoHeld = null; for (const h of q) this.onInput(h.d, { gap: this.gapFor(h.enter) }); }, Number(cue.afterMs) || 0);
         return;
       }
       case 'interrupt': this.interrupt('cue'); return;
@@ -790,6 +813,32 @@ class FakeAgent {
 // ————————————————————————————————————————————————————————————— helpers
 
 /** The context the provider hands its model, from a hook response in the provider's own contract. */
+/**
+ * FLAKE-RIG176-STARVED-STUB-NO-ENTER-108: does a stdin chunk carry the submitting Enter?
+ * Returns a function to call once per chunk, in arrival order. A `\r` inside a bracketed paste
+ * (`\x1b[200~` ... `\x1b[201~`) is pasted text, not the Enter. The in-paste state carries from one
+ * chunk to the next, and so does a paste marker that stdin split between two chunks: its first
+ * part is kept and read together with the next chunk.
+ */
+function enterScanner() {
+  const MARKS = ['\x1b[200~', '\x1b[201~'];
+  let inPaste = false;
+  let tail = '';
+  return (chunk) => {
+    let s = tail + String(chunk);
+    tail = '';
+    let enter = false;
+    while (s.length) {
+      if (s.startsWith(MARKS[0])) { inPaste = true; s = s.slice(6); continue; }
+      if (s.startsWith(MARKS[1])) { inPaste = false; s = s.slice(6); continue; }
+      if (s.length < 6 && MARKS.some((m) => m.startsWith(s))) { tail = s; break; }   // a split marker
+      if (s[0] === '\r' && !inPaste) enter = true;
+      s = s.slice(1);
+    }
+    return enter;
+  };
+}
+
 function contextOf(resp, flavour, event) {
   if (!resp || typeof resp !== 'object') return '';
   if (flavour === 'agy') {
@@ -866,4 +915,4 @@ const appendLine = (p, obj) => { try { fs.appendFileSync(p, `${JSON.stringify(ob
 const pad = (n) => String(n).padStart(2, '0');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-module.exports = { main, parseCodexConfig, contextOf };
+module.exports = { main, parseCodexConfig, contextOf, enterScanner };
