@@ -168,21 +168,44 @@ test('REMOVEDIR: a folder holding READ-ONLY files goes at the first try without 
   const dir = disk.mkdtempSync(path.join(os.tmpdir(), 'ro-'));
   const outside = disk.mkdtempSync(path.join(os.tmpdir(), 'ro-out-'));
   const kept = path.join(outside, 'kept.txt');
+  const keptWritable = path.join(outside, 'kept-rw.txt');
   try {
     disk.mkdirSync(path.join(dir, 'objects', '0b'), { recursive: true });
     for (const file of [path.join(dir, 'top.txt'), path.join(dir, 'objects', '0b', 'deep')]) {
       disk.writeFileSync(file, 'x'); disk.chmodSync(file, 0o444);
     }
     disk.writeFileSync(kept, 'x'); disk.chmodSync(kept, 0o444);
+    disk.writeFileSync(keptWritable, 'x');
     try { disk.symlinkSync(outside, path.join(dir, 'outside'), 'junction'); } catch (error) { t.skip(`junction unavailable: ${error.message}`); return; }
     assert.equal(await removeDir(dir, { budgetMs: 0 }), true, 'TEMP REMOVE: read-only files do not stop removal');
     assert.equal(disk.existsSync(dir), false, 'TEMP REMOVE: the folder is gone');
     assert.equal(disk.readFileSync(kept, 'utf8'), 'x', 'TEMP REMOVE: a file behind the junction stays');
     assert.equal(disk.statSync(kept).mode & 0o200, 0, 'TEMP REMOVE: it stays read-only too');
+    assert.equal(disk.readFileSync(keptWritable, 'utf8'), 'x', 'TEMP REMOVE: a writable file behind the junction stays too');
   } finally {
     for (const d of [dir, outside]) {
       if (!disk.existsSync(d)) continue;
       await removeDir(d, { budgetMs: 0 });
+    }
+  }
+});
+
+test('REMOVEDIR: a root junction is unlinked without changing its read-only target', async (t) => {
+  const { removeDir } = require('./tools/test-temp.cjs');
+  const disk = process.versions.electron ? require('original-fs') : fs;
+  const outside = disk.mkdtempSync(path.join(os.tmpdir(), 'ro-root-out-'));
+  const link = path.join(os.tmpdir(), `ro-root-${process.pid}-${Date.now()}`);
+  const kept = path.join(outside, 'kept.txt');
+  try {
+    disk.writeFileSync(kept, 'x'); disk.chmodSync(kept, 0o444);
+    try { disk.symlinkSync(outside, link, 'junction'); } catch (error) { t.skip(`junction unavailable: ${error.message}`); return; }
+    assert.equal(await removeDir(link, { budgetMs: 0 }), true, 'TEMP REMOVE: a root junction is unlinked');
+    assert.equal(disk.existsSync(link), false, 'TEMP REMOVE: the root junction is gone');
+    assert.equal(disk.readFileSync(kept, 'utf8'), 'x', 'TEMP REMOVE: a root junction target stays');
+    assert.equal(disk.statSync(kept).mode & 0o200, 0, 'TEMP REMOVE: a root junction target stays read-only');
+  } finally {
+    for (const d of [link, outside]) {
+      if (disk.existsSync(d)) await removeDir(d, { budgetMs: 0 });
     }
   }
 });
