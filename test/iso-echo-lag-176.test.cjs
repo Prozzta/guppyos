@@ -28,7 +28,37 @@ async function outcomes(rig) {
 }
 async function story(rig) {
   const sg = (await rig.call('diags')).filter((d) => d.agentId === ID && d.stage === 'screen-guard').map((d) => d.why);
-  return `outcomes ${JSON.stringify(await outcomes(rig))}\n  screen-guard: ${sg.join(' ; ')}`;
+  return `outcomes ${JSON.stringify(await outcomes(rig))}\n  screen-guard: ${sg.join(' ; ')}\n  ${await timeline(rig)}`;
+}
+// FLAKE-ISO-ECHO-LAG-176-COMMIT-NOT-VISIBLE-ELECTRON-108: a red prints WHERE the staged text's
+// echo stalled, in real ms after the send (rig.T0): the host's readings (with their output
+// generation), each stdin chunk's arrival at the stub and its processing, every composer write
+// that was refused and for how long (the write runs BEFORE the echo and blocks the stub), each
+// echo the stub wrote, and each chunk the host's PTY stream delivered. Read once, after the waits.
+async function timeline(rig) {
+  const T0 = rig.T0 || 0;
+  const show = (s) => JSON.stringify(String(s)).slice(0, 90);
+  const lines = [];
+  try {
+    const trace = await rig.call('ptyTrace', { id: ID });
+    lines.push(`timeline (real ms after send): newest echo the host saw ${trace.echoSeen}; host last output +${trace.lastOutputReal ? trace.lastOutputReal - T0 : 'never'}; now +${trace.real - T0}`);
+    const rows = [];
+    for (const o of (await rig.call('outcomes')).filter((x) => x.agentId === ID)) rows.push([o.at, `outcome ${o.outcome.kind} ${o.outcome.reason ?? ''} ${o.outcome.detail ?? ''}`]);
+    for (const d of (await rig.call('diags')).filter((x) => x.agentId === ID && x.stage === 'screen-guard')) rows.push([d.real, `host reading ${d.why}`]);
+    const kinds = ['input-arrived', 'pty-input', 'composer-write-blocked', 'composer-write-retried', 'composer-write-failed', 'echo-written'];
+    for (const r of rig.transcript(ID).filter((x) => kinds.includes(x.kind))) {
+      const extra = r.kind === 'pty-input' ? ` ${show(r.data)}` : r.kind === 'input-arrived' ? ` ${r.bytes} bytes, due in ${r.dueIn} ms`
+        : r.kind.startsWith('composer-write') ? ` ${r.code ?? ''} tries ${r.tries ?? 1}${r.ms !== undefined ? ` for ${r.ms} ms` : ''} seq ${r.seq}` : ` seq ${r.seq}`;
+      rows.push([r.t, `stub ${r.kind}${extra}`]);
+    }
+    for (const c of trace.chunks) {
+      const echo = /rig-echo-(\d+)/.exec(c.head);
+      rows.push([c.real, `host got ${c.bytes} bytes${echo ? ` (echo ${echo[1]})` : ''} ${show(c.head)}`]);
+    }
+    rows.sort((a, b) => a[0] - b[0]);
+    for (const [at, what] of rows) lines.push(`+${Math.round(at - T0)} ${what}`);
+  } catch (e) { lines.push(`timeline failed: ${String((e && e.stack) || e).slice(0, 300)}`); }
+  return lines.join('\n  ');
 }
 /** Beat about once a second until `pred(outcomes)` holds, or `beats` run out. */
 async function beatUntil(rig, pred, beats) {
@@ -55,6 +85,7 @@ for (const lag of [1500, 5000]) {
   test(`ISO echo lag ${lag} ms: the slow echo is waited for and COMMITTED, never held`, T, async (t) => {
     const rig = await startRig(t);
     await rig.setup([{ id: ID, flavour: 'codex', scenario: { echoLagMs: lag } }]);
+    rig.T0 = Date.now();
     await rig.call('send', { to: ID, subject: 'lag', body: 'hello' });
     const o = await beatUntil(rig, (x) => x.some((y) => y.kind === 'COMMITTED' || y.kind === 'INTERFERED'), 40);
     const why = await story(rig);
@@ -78,6 +109,7 @@ const TEXT_LAG_MS = 17_500;
 async function beyondBudget(t, eraseLagMs) {
   const rig = await startRig(t);
   await rig.setup([{ id: ID, flavour: 'codex', scenario: { echoLagMs: TEXT_LAG_MS, echoLagChunks: 1, echoLagAfterMs: eraseLagMs } }]);
+  rig.T0 = Date.now();
   await rig.call('send', { to: ID, subject: 'lag', body: 'hello' });
   const first = await beatUntil(rig, (x) => x.some((y) => y.kind !== 'REFUSED'), 75);
   return { rig, first, settled: first.find((y) => y.kind !== 'REFUSED'), why: await story(rig) };
