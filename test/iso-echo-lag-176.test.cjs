@@ -46,11 +46,12 @@ async function timeline(rig) {
     for (const o of (await rig.call('outcomes')).filter((x) => x.agentId === ID)) rows.push([o.at, `outcome ${o.outcome.kind} ${o.outcome.reason ?? ''} ${o.outcome.detail ?? ''}`]);
     for (const d of (await rig.call('diags')).filter((x) => x.agentId === ID && x.stage === 'screen-guard')) rows.push([d.real, `host reading ${d.why}`]);
     // The stub writes no row when a chunk arrives (ISO-ECHO-DIAG-TIMING-NEUTRAL-108): its pty-input
-    // row carries arrivedAt and dueIn, and the echo that the same call writes.
+    // row carries arrivedAt and dueIn, and the echo that the same call writes (at the pty-input t, or
+    // at the composer-write-retried/failed t when the write was refused).
     const kinds = ['pty-input', 'composer-write-blocked', 'composer-write-retried', 'composer-write-failed', 'echo-written'];
     for (const r of rig.transcript(ID).filter((x) => kinds.includes(x.kind))) {
       if (r.kind === 'pty-input' && r.arrivedAt !== undefined) rows.push([r.arrivedAt, `stub input-arrived ${String(r.data).length} chars, due in ${r.dueIn} ms`]);
-      const extra = r.kind === 'pty-input' ? ` ${show(r.data)}${r.echo !== undefined ? ` (writes echo ${r.echo})` : ''}`
+      const extra = r.kind === 'pty-input' ? ` ${show(r.data)}${r.echo !== undefined ? ` (echo ${r.echo} leaves after the composer write)` : ''}`
         : r.kind.startsWith('composer-write') ? ` ${r.code ?? ''} tries ${r.tries ?? 1}${r.ms !== undefined ? ` for ${r.ms} ms` : ''} seq ${r.seq}` : ` seq ${r.seq}`;
       rows.push([r.t, `stub ${r.kind}${extra}`]);
     }
