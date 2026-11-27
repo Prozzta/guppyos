@@ -9,56 +9,9 @@
 const fs = process.versions.electron ? require('original-fs') : require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { rmTree } = require('./rm-tree.cjs');
 
 const made = [];
-
-// Clears the read-only bit under `dir` without following a symlink or junction outside it.
-function makeWritable(dir) {
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const file = path.join(dir, entry.name);
-    const stat = fs.lstatSync(file);
-    if (stat.isSymbolicLink()) continue;
-    if (stat.isDirectory()) makeWritable(file); else fs.chmodSync(file, 0o666);
-  }
-}
-
-// Electron's original-fs recursive rmSync follows Windows junctions. Unlink them before either
-// removal attempt so a file outside `dir` is neither changed nor used to block cleanup. This
-// lstat/readdir walk has the ordinary TOCTOU gap if a hostile process swaps a link mid-walk; the
-// helper only removes test-owned temp trees, so that residual is accepted here.
-function unlinkLinks(dir) {
-  let stat;
-  try { stat = fs.lstatSync(dir); } catch (error) {
-    if (error.code === 'ENOENT') return;
-    throw error;
-  }
-  if (stat.isSymbolicLink()) { fs.unlinkSync(dir); return true; }
-  if (!stat.isDirectory()) return false;
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const file = path.join(dir, entry.name);
-    const child = fs.lstatSync(file);
-    if (child.isSymbolicLink()) fs.unlinkSync(file);
-    else if (child.isDirectory()) unlinkLinks(file);
-  }
-  return false;
-}
-
-/**
- * Removes a tree containing read-only files. Electron 45's rmSync reports EPERM for those files
- * on Windows, although current Node removes them. Retry once only after clearing their read-only
- * bit; any other error, or a second failure, remains the caller's normal removal failure.
- */
-function rmTree(dir, options = {}) {
-  const rmOptions = { recursive: true, force: true, ...options };
-  // This must happen before makeWritable: readdir on a root junction enters its target.
-  if (unlinkLinks(dir)) return;
-  try { fs.rmSync(dir, rmOptions); } catch (error) {
-    if (error.code !== 'EPERM') throw error;
-    try { makeWritable(dir); } catch { throw error; }
-    unlinkLinks(dir);
-    fs.rmSync(dir, rmOptions);
-  }
-}
 
 /**
  * Removes `dir` (await it in t.after), trying again every 250 ms for up to `budgetMs` while
