@@ -419,6 +419,9 @@ test('B1 residue check: a real escape is red and names its token; a foreign mark
   // A real escape: B1's own marker in the real folder (its body names a B1 job) stays red.
   assert.deepEqual(one('guppy-heavy-job-77777-134394070585547747.marker', 'Local\\guppy-heavy-hcpu-b1-4321-live-uncapped'), ['body (job name)=hcpu-b1-4321']);
   assert.deepEqual(one('guppy-heavy-job-39407-134394070585547747.marker', 'Local\\guppy-heavy-hcpu-b1-4321-live-cap\r\n'), ['file name (pid field)=39407', 'body (job name)=hcpu-b1-4321']);
+  // Pid reuse (Jim MUST 1): a foreign shell got a B1 pid after it exited; its body names its own job.
+  assert.deepEqual(one('guppy-heavy-job-39407-134394070585547747.marker', 'Local\\guppy-heavy-creed-mukyiphw-mwkoyh97-44'), [], 'a reused pid with a foreign job body is not a leak');
+  assert.deepEqual(one('guppy-heavy-job-39407-134394070585547747.marker', ''), ['file name (pid field)=39407'], 'an empty (torn) body keeps the pid-field red');
   assert.deepEqual(one('guppy-heavy-job-5150-134394070585547747.marker', 'Local\\guppy-heavy-hcpu-b1-4321-3'), ['body (job name)=hcpu-b1-4321'], 'a self-query job');
   assert.deepEqual(one('guppy-heavy-job-5150-134394070585547747.marker', 'Local\\guppy-heavy-hcpu-b1-4321'), ['body (job name)=hcpu-b1-4321'], 'the bare id');
   // Shapes the helper never writes: bounded tokens only, field by field for JSON.
