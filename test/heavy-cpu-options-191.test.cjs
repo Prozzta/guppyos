@@ -397,6 +397,42 @@ test('the LIVE Bash join cell (B1) lives in the serial perf lane, with its 30 s 
   assert.equal((here.match(/^test\('LIVE Bash join /gm) || []).length, 0, 'the cell runs once, in the lane');
 });
 
+// B1-MARKER-LEAK-CHECK-SUBSTRING-MATCH-108: B1's residue check matches whole fields, not substrings.
+// A suite went red on the foreign live marker guppy-heavy-job-120004-134394070585547747.marker, whose
+// creation-time tail (or body) can hold a short pid's digits, and the red could not name the token.
+test('B1 residue check: a real escape is red and names its token; a foreign marker that holds the pid digits is not a leak', () => {
+  const { markerLeaks } = require('./tools/b1-marker-leak.cjs');
+  const marks = { id: 'hcpu-b1-4321', names: ['hcpu-b1-4321-live-cap', 'hcpu-b1-4321-live-uncapped'], pids: [39407, 8812] };
+  const one = (file, body) => markerLeaks([{ file, body }], marks).map(({ token, where }) => `${where}=${token}`);
+  // The old rule: any file whose name or body CONTAINS a token.
+  const oldRule = (file, body) => ['hcpu-b1-4321', 'hcpu-b1-4321-live-cap', 'hcpu-b1-4321-live-uncapped', '39407', '8812'].some((t) => file.includes(t) || body.includes(t));
+  const foreign = [
+    ['guppy-heavy-job-120004-134394039407547747.marker', 'Local\\guppy-heavy-creed-mukyiphw-mwkoyh97-44'], // the pid in the time tail
+    ['guppy-heavy-job-394071-134394070585547747.marker', 'Local\\guppy-heavy-creed-mukyiphw-mwkoyh97-44'], // the pid inside a longer pid
+    ['guppy-heavy-job-120004-134394070585547747.marker', 'Local\\guppy-heavy-x-88120-3'], // the pid inside a foreign job name
+    ['guppy-heavy-job-120004-134394070585547747.marker', 'Local\\guppy-heavy-hcpu-b1-43210-live-cap'], // another B1 run, a longer pid
+  ];
+  for (const [file, body] of foreign) {
+    assert.ok(oldRule(file, body), `fixture ${file} ${body} trips the old substring rule (red-before)`);
+    assert.deepEqual(one(file, body), [], `foreign ${file} ${body} is not B1's`);
+  }
+  // A real escape: B1's own marker in the real folder (its body names a B1 job) stays red.
+  assert.deepEqual(one('guppy-heavy-job-77777-134394070585547747.marker', 'Local\\guppy-heavy-hcpu-b1-4321-live-uncapped'), ['body (job name)=hcpu-b1-4321']);
+  assert.deepEqual(one('guppy-heavy-job-39407-134394070585547747.marker', 'Local\\guppy-heavy-hcpu-b1-4321-live-cap\r\n'), ['file name (pid field)=39407', 'body (job name)=hcpu-b1-4321']);
+  assert.deepEqual(one('guppy-heavy-job-5150-134394070585547747.marker', 'Local\\guppy-heavy-hcpu-b1-4321-3'), ['body (job name)=hcpu-b1-4321'], 'a self-query job');
+  assert.deepEqual(one('guppy-heavy-job-5150-134394070585547747.marker', 'Local\\guppy-heavy-hcpu-b1-4321'), ['body (job name)=hcpu-b1-4321'], 'the bare id');
+  // Shapes the helper never writes: bounded tokens only, field by field for JSON.
+  assert.deepEqual(one('hcpu-b1-4321.tmp', ''), ['file name (not a marker name)=hcpu-b1-4321']);
+  assert.deepEqual(one('xhcpu-b1-43210.tmp', ''), []);
+  assert.deepEqual(one('stray.json', '{"pid":39407,"t":"1343940394075"}'), ['body JSON.pid=39407']);
+  assert.deepEqual(one('stray.txt', 'owner 8812 at 1343940394075'), ['body=8812']);
+  // The cell prints the token, where, and the forbidden list on a red.
+  const perf = fs.readFileSync(path.join(__dirname, 'perf', 'heavy-cpu-live-bash-b1.perf.cjs'), 'utf8');
+  assert.match(perf, /markerLeaks\(entries, marks\)/, 'the cell uses the bounded check');
+  assert.ok(perf.includes('${where} matched ${JSON.stringify(token)}') && perf.includes('forbidden: ${JSON.stringify(marks)}'), 'a red names the token, where it matched and the forbidden list');
+  assert.doesNotMatch(perf, /file\.includes\(token\)|body\.includes\(token\)/, 'no substring match is left');
+});
+
 test('LIVE cmd: the `&` join line leaves the command exactly as cmd runs it (output and exit code), and its processes are in the job',
   { skip: process.platform !== 'win32' ? 'cmd is Windows-only' : !fs.existsSync(CSC) ? `no in-box csc at ${CSC}` : false, timeout: 120_000 },
   async () => {

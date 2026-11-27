@@ -140,10 +140,19 @@ test('LIVE Bash join keeps its marker for repeated, sibling and background self-
        step('marker jail removed');
      }
     // Do not snapshot/diff another user's shared marker folder: only this test's identifiers matter.
-    const forbidden = [id, capName, uncappedName, capped?.pid, uncapped?.pid].filter(Boolean).map(String);
+    // B1-MARKER-LEAK-CHECK-SUBSTRING-MATCH-108: they match as whole fields (a marker name's pid
+    // field, a body's job id), never as substrings, so a foreign marker whose creation-time tail
+    // holds a pid's digits is not a leak (test/tools/b1-marker-leak.cjs). A red names the token,
+    // where it matched and the forbidden list. A foreign marker its own helper deleted between the
+    // listing and the read (ENOENT) is skipped; any other read error still fails.
+    const { markerLeaks } = require('../tools/b1-marker-leak.cjs');
+    const marks = { id, names: [capName, uncappedName].filter(Boolean), pids: [capped?.pid, uncapped?.pid].filter(Boolean) };
     const knownFiles = fs.existsSync(knownRoot) ? fs.readdirSync(knownRoot) : [];
+    const entries = [];
     for (const file of knownFiles) {
-      const body = fs.readFileSync(path.join(knownRoot, file), 'utf8');
-      assert.ok(!forbidden.some((token) => file.includes(token) || body.includes(token)), `jailed B1 leaked marker ${file} into real LocalAppData`);
+      try { entries.push({ file, body: fs.readFileSync(path.join(knownRoot, file), 'utf8') }); } catch (e) { if (e.code !== 'ENOENT') throw e; }
     }
+    const leaks = markerLeaks(entries, marks);
+    const said = leaks.map(({ file, token, where }) => `jailed B1 leaked marker ${file} into real LocalAppData: ${where} matched ${JSON.stringify(token)}`);
+    assert.ok(leaks.length === 0, `${said.join('\n')}\nforbidden: ${JSON.stringify(marks)} (in ${knownRoot})`);
   });
