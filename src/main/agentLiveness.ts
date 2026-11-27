@@ -42,7 +42,9 @@ export type LivenessReason =
   | 'rollout-started' | 'pty-traffic' | 'hook-traffic' | 'turn-started'
   | 'rollout-complete-no-stop' | 'no-progress' | 'wake-refusal-stall'
   | typeof LIVENESS_REASON_OPERATOR_HOLD
-  | 'turn-ended' | 'quiescent' | 'awaiting-wake';
+  | 'turn-ended' | 'quiescent' | 'awaiting-wake'
+  /** WAKE-CODEX-MODAL-PROMPT-BLOCKS-108: Codex shows a popup and no turn is open. */
+  | 'screen-popup';
 
 /** The live PTY of the agent, as the PTY manager reports it. */
 export interface LivenessPtyFacts {
@@ -85,6 +87,9 @@ export interface LivenessFacts {
   mailWaiting: number;
   /** Codex only: the newest turn boundary in the agent's rollout (undefined = not Codex / unreadable). */
   rollout?: { kind: 'started' | 'complete'; turnId: string; at: number } | null;
+  /** WAKE-CODEX-MODAL-PROMPT-BLOCKS-108: a Codex popup is on this incarnation's screen, as the
+   *  startup reading or the screen gate last read it (codexPopupWatch.ts). Absent = none known. */
+  screenPopup?: boolean;
 }
 
 /** One PTY incarnation ended. `explicit`: the harness asked for it (a kill, a window close). */
@@ -199,6 +204,10 @@ export function classifyLiveness(facts: LivenessFacts | null, memo: Readonly<Mem
     if (operatorHold) return verdict('IDLE', LIVENESS_REASON_OPERATOR_HOLD, inc);
     return verdict('SUSPECT', 'no-progress', inc);
   }
+  // WAKE-CODEX-MODAL-PROMPT-BLOCKS-108: no turn open and Codex is asking a question nobody has
+  // answered. Neither idle (it takes no mail, so it is not free for work) nor busy (a popup that
+  // redraws is not progress) nor a hold: UNKNOWN, with the reason that says what a person must do.
+  if (facts.screenPopup === true) return verdict('UNKNOWN', 'screen-popup', inc);
   // No turn open. The screen is moving where nothing says a turn ended: busy (not judged idle).
   if (w.lifecycle === 'unknown' && ptyAt > 0 && now - ptyAt < WORKER_WAKE_IDLE_MS) return verdict('BUSY_PROGRESSING', 'pty-traffic', inc);
   if (operatorHold) return verdict('IDLE', LIVENESS_REASON_OPERATOR_HOLD, inc);

@@ -509,6 +509,15 @@ export interface StartupReadingRecord {
   seen: number;
 }
 
+/** WAKE-CODEX-MODAL-PROMPT-BLOCKS-108: what one Codex startup reading saw of a popup. */
+export interface StartupPopupRecord {
+  ptyId: string;
+  incarnation: unknown;
+  /** The popup in one bounded line (codexPopupText), or null: this reading saw none. */
+  popup: string | null;
+  outputGeneration: number;
+}
+
 /** STARTUP-LATCH-QUIET-193 (b): the most startup-reading rows one incarnation logs per reason. */
 export const STARTUP_READING_LOG_MAX = 20;
 
@@ -680,6 +689,9 @@ export interface OwnerDeps {
   /** DWIGHT-INPUT-DEAD-179 F2: told of a startup reading, once per incarnation and reason.
    *  Diagnostics only. */
   onStartupReading?: (record: StartupReadingRecord) => void;
+  /** WAKE-CODEX-MODAL-PROMPT-BLOCKS-108: the popup a Codex startup reading saw (null = none), on
+   *  every such reading. */
+  onStartupPopup?: (record: StartupPopupRecord) => void;
   /** DWIGHT-INPUT-DEAD-179 F4: Codex wrote `thread_settings_applied` to this PTY's rollout after
    *  its LIVE incarnation was spawned. Absent, throwing or false = no proof. */
   threadConfigured?: (ptyId: string) => boolean;
@@ -1165,6 +1177,14 @@ export class AutomaticSubmitOwner {
     const seenPast = tui ? tuiPastStartup(classifyTuiComposer(tui, r.facts)) : codexPastStartup(r.facts, deps.spawnCwd?.(ptyId), deps.homeDir?.());
     const past = seenPast.open && !this.latchSettled(ptyId, tui) ? { open: false, reason: 'session-settling' } : seenPast;
     this.reportStartupReading(ptyId, incarnation, past, r);
+    // WAKE-CODEX-MODAL-PROMPT-BLOCKS-108: every Codex startup reading says whether a popup is up
+    // (never deduped: its absence is what ends one). Told only; nothing here answers a popup.
+    if (!tui) {
+      try {
+        const popup = codexPopup(r.facts);
+        deps.onStartupPopup?.({ ptyId, incarnation, popup: popup ? codexPopupText(popup) : null, outputGeneration: r.outputGeneration });
+      } catch { /* diagnostics never decide */ }
+    }
     if (past.open && r.outputGeneration > 0) { this.postHandoff.set(ptyId, incarnation); return true; }
     if (!tui && this.threadProof(ptyId, r)) {
       this.postHandoff.set(ptyId, incarnation);
