@@ -60,6 +60,8 @@ export interface OwnerWiring {
   onScreenGuard?: OwnerDeps['onScreenGuard'];
   /** DWIGHT-INPUT-DEAD-179 F2: a startup reading's verdict, once per incarnation and reason. */
   onStartupReading?: OwnerDeps['onStartupReading'];
+  /** WAKE-CODEX-MODAL-PROMPT-BLOCKS-108: the popup each Codex startup reading saw, or none. */
+  onStartupPopup?: OwnerDeps['onStartupPopup'];
   /** DWIGHT-INPUT-DEAD-179 F4: Codex applied this PTY's thread settings after its spawn. */
   threadConfigured?: OwnerDeps['threadConfigured'];
   /** DWIGHT-HELD-INTERFERED fix 4: every INTERFERED hold, with the last screen facts seen. */
@@ -170,6 +172,7 @@ export function buildOwnerDeps(w: OwnerWiring): OwnerDeps {
     homeDir: w.homeDir,
     onScreenGuard: w.onScreenGuard,
     onStartupReading: w.onStartupReading,
+    onStartupPopup: w.onStartupPopup,
     threadConfigured: w.threadConfigured,
     onInterfered: w.onInterfered,
     bootReady: w.bootReady,

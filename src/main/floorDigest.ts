@@ -44,7 +44,12 @@ export const DIGEST_WOKEN_FILE = 'digest-woken.json';
 /** The sender of a digest wake. NOT in SYSTEM_SENDERS: decisions are actionable mail. */
 export const DIGEST_SENDER = 'digest';
 
-export interface DecisionItem { id: string; cardId: string | null; line: string }
+export interface DecisionItem {
+  id: string; cardId: string | null; line: string;
+  /** WAKE-CODEX-MODAL-PROMPT-BLOCKS-108: god is woken for this item at once, not after the batch
+   *  window (an agent that takes no mail until someone answers its screen). */
+  urgent?: true;
+}
 
 export interface DigestAgent {
   id: string;
@@ -67,6 +72,19 @@ export interface DigestQuietStall { agentId: string; name?: string; count: numbe
 export interface DigestWakeStall { agentId: string; name?: string; why: string; inboxIds: number; since: number }
 /** WAKE-STUCK-REFUSAL-ESCALATE: a run of identical refused settles on one terminal incarnation (refusedSettleWatch.ts). */
 export interface DigestRefusedSettle extends RefusedStall { name?: string }
+/** WAKE-CODEX-MODAL-PROMPT-BLOCKS-108: a Codex popup that has stayed on an agent's screen
+ *  (codexPopupWatch.ts). `text` is the popup in one bounded line. */
+export interface DigestCodexPopup { agentId: string; name?: string; incarnation: number | null; text: string; since: number }
+
+/** One item per popup on one incarnation (its id carries both and when it was first read). It only
+ *  tells god: the harness never answers a popup, and the line says so. */
+export function codexPopupItem(p: DigestCodexPopup, now: number): DecisionItem {
+  const who = p.name ?? p.agentId;
+  return {
+    id: `codex-popup:${p.agentId}:${p.incarnation ?? '?'}:${p.since}`, cardId: null, urgent: true,
+    line: `${who}: Codex has had a popup up for ${ageText(now - p.since)}: "${p.text}" - ${who} takes no mail and every automatic wake is refused until someone answers it; the harness typed nothing and chose nothing (god: term read ${p.agentId}, then decide the answer)`
+  };
+}
 
 /** REQUESTS-AUTO-190: an ask the backstop closed (hive.autoCloseStaleObligations writes them). */
 export interface DigestBackstopClosed { agentId: string; from: string; id: string; subject: string; at: number }
@@ -136,6 +154,7 @@ export interface FloorDigestInput {
   quietStalls?: DigestQuietStall[];
   wakeStalls?: DigestWakeStall[];
   refusedSettles?: DigestRefusedSettle[];
+  codexPopups?: DigestCodexPopup[];
   mirrorOff?: DigestMirrorOff | null;
   messageBox?: DigestMessageBox[];
   floorStall?: DigestFloorStall | null;
@@ -159,13 +178,17 @@ export { ageText };
 /** The decision items: decision flags, plus every ledger ERROR (a duplicate id, an unknown
  *  status), which only god can fix by hand. A STALE item's id carries the day, so it
  *  re-arms once a day while the card stays stale. */
-export function decisionItems(flags: readonly BoardFlag[], ledgerIssues: readonly LedgerIssue[], now: number, heldWakes: readonly DigestHeldWake[] = [], silentTurns: readonly SilentTurn[] = [], quietStalls: readonly DigestQuietStall[] = [], wakeStalls: readonly DigestWakeStall[] = [], refusedSettles: readonly DigestRefusedSettle[] = []): DecisionItem[] {
+export function decisionItems(flags: readonly BoardFlag[], ledgerIssues: readonly LedgerIssue[], now: number, heldWakes: readonly DigestHeldWake[] = [], silentTurns: readonly SilentTurn[] = [], quietStalls: readonly DigestQuietStall[] = [], wakeStalls: readonly DigestWakeStall[] = [], refusedSettles: readonly DigestRefusedSettle[] = [], codexPopups: readonly DigestCodexPopup[] = []): DecisionItem[] {
   const items: DecisionItem[] = [];
+  // WAKE-CODEX-MODAL-PROMPT-BLOCKS-108: a popup is the cause of that agent's refused wakes, so it is
+  // the agent's one item (first, and named) and its wake-stall and refused-settle items are dropped.
+  const popped = new Set(codexPopups.map((p) => p.agentId));
+  for (const p of codexPopups) items.push(codexPopupItem(p, now));
   // One item per stall run (its id carries when the run began). A hold or a never-quiet terminal
   // already has its own item below, with what to do about it: one decision per agent, not two.
   const covered = new Set([...heldWakes.map((h) => h.agentId), ...quietStalls.map((q) => q.agentId)]);
   for (const s of wakeStalls) {
-    if (covered.has(s.agentId) || s.why === 'held-interfered') continue;
+    if (covered.has(s.agentId) || popped.has(s.agentId) || s.why === 'held-interfered') continue;
     const who = s.name ?? s.agentId;
     items.push({
       id: `wake-stall:${s.agentId}:${s.since}`, cardId: null,
@@ -177,7 +200,7 @@ export function decisionItems(flags: readonly BoardFlag[], ledgerIssues: readonl
   // with a hold, a never-quiet terminal or a wake stall already has its item: one decision, not two.
   const stalled = new Set(wakeStalls.map((s) => s.agentId));
   for (const r of refusedSettles) {
-    if (covered.has(r.agentId) || stalled.has(r.agentId)) continue;
+    if (covered.has(r.agentId) || popped.has(r.agentId) || stalled.has(r.agentId)) continue;
     items.push({
       id: `wake-refusal-stuck:${r.agentId}:${r.incarnation}:${r.since}`, cardId: null,
       line: refusedStallLine(r, r.name ?? r.agentId, now)
@@ -309,7 +332,7 @@ export function buildFloorDigest(input: FloorDigestInput): { markdown: string; d
     const raw = Array.isArray(t) ? t : (t && typeof t === 'object' && Array.isArray((t as { tasks?: unknown }).tasks)) ? (t as { tasks: unknown[] }).tasks : [];
     return firstOccurrenceById(raw.filter((c): c is Card => !!c && typeof c === 'object' && typeof (c as { id?: unknown }).id === 'string'), (c) => c.id);
   })();
-  const items = decisionItems(input.flags, input.ledgerIssues, now, input.heldWakes ?? [], input.silentTurns ?? [], input.quietStalls ?? [], input.wakeStalls ?? [], input.refusedSettles ?? []);
+  const items = decisionItems(input.flags, input.ledgerIssues, now, input.heldWakes ?? [], input.silentTurns ?? [], input.quietStalls ?? [], input.wakeStalls ?? [], input.refusedSettles ?? [], input.codexPopups ?? []);
   const disk = input.scratchDisk;
   if (disk && disk.bytes > disk.budgetBytes) items.unshift({
     id: `scratch-disk:${disk.budgetBytes}`, cardId: null,
@@ -386,7 +409,7 @@ export function buildFloorDigest(input: FloorDigestInput): { markdown: string; d
   if (input.agents.length === 0) out.push('No agents.');
   for (const a of input.agents) {
     const state = a.onHold ? 'on hold' : a.liveness?.classification ? a.liveness.classification.toLowerCase() : 'unknown';
-    const hold = a.liveness?.reason === 'operator-hold' ? ' (on hold)' : '';
+    const hold = a.liveness?.reason === 'operator-hold' ? ' (on hold)' : a.liveness?.reason === 'screen-popup' ? ' (a Codex popup is waiting for an answer)' : '';
     out.push(`- ${a.name ?? a.id} (${a.id}): ${state}${hold}; ${a.inboxBacklog ?? 0} message(s) waiting`);
   }
   out.push('');
@@ -434,7 +457,14 @@ export function decideGodWake(items: readonly DecisionItem[], state: WakeState, 
   const fresh = items.filter((i) => !(i.id in woken));
   if (fresh.length === 0) return { wake: [], state: { woken, pendingSince: null } };
   const since = state.pendingSince ?? now;
-  if (now - since < wakeBatchMs) return { wake: [], state: { woken, pendingSince: since } };
+  if (now - since < wakeBatchMs) {
+    // WAKE-CODEX-MODAL-PROMPT-BLOCKS-108: an urgent item does not wait out the window. Only the
+    // urgent ones go now; the rest keep the window they were already in.
+    const urgent = fresh.filter((i) => i.urgent === true);
+    if (urgent.length === 0) return { wake: [], state: { woken, pendingSince: since } };
+    for (const i of urgent) woken[i.id] = now;
+    return { wake: urgent, state: { woken, pendingSince: urgent.length < fresh.length ? since : null } };
+  }
   for (const i of fresh) woken[i.id] = now;
   return { wake: fresh, state: { woken, pendingSince: null } };
 }
@@ -466,6 +496,8 @@ export interface FloorDigestHost {
   wakeStalls?(): DigestWakeStall[];
   /** WAKE-STUCK-REFUSAL-ESCALATE: runs of identical refused settles. Optional. */
   refusedSettles?(): DigestRefusedSettle[];
+  /** WAKE-CODEX-MODAL-PROMPT-BLOCKS-108: Codex popups that have stayed up. Optional. */
+  codexPopups?(): DigestCodexPopup[];
   /** MIRROR-STARTUP-196: the terminal mirrors' auto-off, while it lasts. Optional. */
   mirrorOff?(): DigestMirrorOff | null;
   /** GTC M3: the Human's message-box sends that need a look (the last hour). Optional. */
@@ -543,6 +575,7 @@ export class FloorDigest {
       quietStalls: (() => { try { return this.host.quietStalls?.() ?? []; } catch { return []; } })(),
       wakeStalls: (() => { try { return this.host.wakeStalls?.() ?? []; } catch { return []; } })(),
       refusedSettles: (() => { try { return this.host.refusedSettles?.() ?? []; } catch { return []; } })(),
+      codexPopups: (() => { try { return this.host.codexPopups?.() ?? []; } catch { return []; } })(),
       mirrorOff: (() => { try { return this.host.mirrorOff?.() ?? null; } catch { return null; } })(),
       messageBox: (() => { try { return this.host.messageBox?.() ?? []; } catch { return []; } })(),
       floorStall: (() => { try { return this.host.floorStall?.() ?? null; } catch { return null; } })(),
