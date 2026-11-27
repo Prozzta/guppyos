@@ -41,7 +41,7 @@ async function timeline(rig) {
   const lines = [];
   try {
     const trace = await rig.call('ptyTrace', { id: ID });
-    lines.push(`timeline (real ms after send): newest echo the host saw ${trace.echoSeen}; host last output +${trace.lastOutputReal ? trace.lastOutputReal - T0 : 'never'}; now +${trace.real - T0}`);
+    lines.push(`timeline (real ms after send): newest echo the host saw ${trace.echoSeen}; host last output +${trace.lastOutputReal ? trace.lastOutputReal - T0 : 'never'}; now +${trace.real - T0}; host chunks: the last ${trace.chunks.length} (the rig keeps at most 40, so earlier ones may be gone)`);
     const rows = [];
     for (const o of (await rig.call('outcomes')).filter((x) => x.agentId === ID)) rows.push([o.at, `outcome ${o.outcome.kind} ${o.outcome.reason ?? ''} ${o.outcome.detail ?? ''}`]);
     for (const d of (await rig.call('diags')).filter((x) => x.agentId === ID && x.stage === 'screen-guard')) rows.push([d.real, `host reading ${d.why}`]);
