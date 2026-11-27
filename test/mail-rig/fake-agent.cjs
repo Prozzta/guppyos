@@ -244,7 +244,8 @@ class FakeAgent {
   onInput(d, how) {
     // ISO-ECHO-DIAG-TIMING-NEUTRAL-108: in a lag scenario this row also carries the chunk's arrival
     // and the echo it makes. That echo goes out later in this same synchronous call (unless held),
-    // so this row's t marks it too, and no echo-written row is added for it.
+    // after writeComposer: it leaves at this row's t, or, when the composer write was refused, at the
+    // composer-write-retried/failed row's t. No echo-written row is added for it.
     this.rec('pty-input', how && how.arrivedAt !== undefined
       ? { data: d, arrivedAt: how.arrivedAt, dueIn: how.dueIn, echo: this.hung ? null : this.echoSeq + 1 } : { data: d });
     if (this.hung) return;
