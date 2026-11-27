@@ -25,9 +25,10 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const runner = require('./tools/run-tests.cjs');
+const { rmTree } = require('./tools/rm-tree.cjs');
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'temp-hygiene-'));
-test.after(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
+test.after(() => rmTree(tmpRoot));
 let n = 0;
 const fresh = (name) => { const d = path.join(tmpRoot, `${name}-${++n}`); fs.mkdirSync(d, { recursive: true }); return d; };
 
