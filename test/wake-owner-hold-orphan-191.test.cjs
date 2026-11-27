@@ -116,5 +116,5 @@ test('wiring: main feeds the watch from the owner\'s holds and the digest from t
   const dig = fs.readFileSync(path.join(ROOT, 'src', 'main', 'floorDigest.ts'), 'utf8');
   assert.match(dig, /wakeStalls: \(\(\) => \{ try \{ return this\.host\.wakeStalls\?\.\(\) \?\? \[\]; \} catch \{ return \[\]; \} \}\)\(\),/);
   // WAKE-STUCK-REFUSAL-ESCALATE added the last argument.
-  assert.match(dig, /input\.quietStalls \?\? \[\], input\.wakeStalls \?\? \[\], input\.refusedSettles \?\? \[\]\)/);
+  assert.match(dig, /input\.quietStalls \?\? \[\], input\.wakeStalls \?\? \[\], input\.refusedSettles \?\? \[\], input\.codexPopups \?\? \[\]\)/);
 });
