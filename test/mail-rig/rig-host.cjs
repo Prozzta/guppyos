@@ -270,7 +270,7 @@ async function buildFloor() {
     },
     // The hooks' `at` is the simulated clock; the owner's hold time is real (index.ts: both Date.now).
     turnEndedSince: (agentId, since) => { const t = workerWake.livenessFacts(agentId).lastTurnEndAt; return t > 0 && t >= clock.at(since); },
-    onScreenGuard: (r) => { diags.push({ stage: 'screen-guard', agentId: r.agentId, why: r.phase + ':' + (r.ok ? 'ok' : 'NO') + ':' + r.reason + ':gen=' + r.observedGeneration + '/' + r.currentGeneration, at: clock.now() }); if (diags.length > 5000) diags.shift(); },
+    onScreenGuard: (r) => { diags.push({ stage: 'screen-guard', agentId: r.agentId, why: r.phase + ':' + (r.ok ? 'ok' : 'NO') + ':' + r.reason + ':gen=' + r.observedGeneration + '/' + r.currentGeneration, at: clock.now(), real: Date.now() }); if (diags.length > 5000) diags.shift(); },
     onOutcome: (r) => { outcomes.push({ agentId: r.agentId, requestId: r.requestId, cls: r.admissionClass, outcome: r.outcome, at: r.at }); if (outcomes.length > 500) outcomes.shift(); }
   }));
 
