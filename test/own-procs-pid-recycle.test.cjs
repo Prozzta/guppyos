@@ -13,7 +13,7 @@ require('./tools/mutant-runner-helper.cjs').gate(__filename);
  */
 const test = require('node:test');
 const assert = require('node:assert');
-const { execFileSync, spawnSync } = require('node:child_process');
+const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const own = require('./tools/own-procs.cjs');
@@ -35,7 +35,21 @@ const TABLE = [
 /** Fake deps that record every kill; `now` is the table at kill time (default: unchanged). */
 const deps = (now = TABLE) => { const kills = []; return { kills, lookup: (pids) => now.filter((r) => pids.includes(r.pid)), kill: (rows) => kills.push(...rows.map((r) => r.pid)) }; };
 
+/**
+ * FLAKE-PTY-CLOSETREE-PIDREUSE-ELECTRON-FILE-CRASH-108: the raced script has no identity check, so it stops whatever
+ * process has the pid. It ran on the pids of exited cmd.exe children, which Windows may give to a new process at once (a
+ * test file of the same run, which then dies with exit -1, no output and no .stops row, since this file runs the script
+ * itself). It now takes only a pid Windows never assigns: Windows pids are multiples of 4, so 4n+2 is never a process.
+ * The one other row allowed is Idle (pid 0), which Stop-Process can never stop.
+ */
+const NEVER_ASSIGNED = (n) => 4 * n + 2;
+const neverAssignedRow = (n) => R(NEVER_ASSIGNED(n), 0, 1, 'cmd.exe');
 function racedStopScript(rows) {
+  for (const r of rows) {
+    const idle = r.pid === 0 && r.name === 'Idle';
+    assert.ok(idle || (Number.isInteger(r.pid) && r.pid > 0 && r.pid % 4 === 2),
+      `racedStopScript stops with no identity check, so it only takes a pid Windows never assigns (4n+2) or Idle; got ${r.pid}`);
+  }
   const script = own.stopScript(rows);
   const identity = /if \(\$q -and [^\n]*\) \{\n/;
   assert.strictEqual((script.match(new RegExp(identity.source, 'g')) || []).length, 1, 'the identity branch is replaced exactly once to model exit-after-check');
@@ -51,12 +65,6 @@ function runStopScript(script) {
     error.message += `\n${String(error.stderr || '').trim()}`;
     throw error;
   }
-}
-
-function exitedCmdRow() {
-  const gone = spawnSync('cmd.exe', ['/c', 'exit'], { windowsHide: true });
-  assert.strictEqual(gone.status, 0, 'the race fixture command exited');
-  return R(gone.pid, 0, 1, 'cmd.exe');
 }
 
 test('a child is created at or after its parent: an OLDER process naming the parent is not a child', () => {
@@ -168,10 +176,20 @@ test('stopIfSame: a process that exits after the identity check is success, whil
 });
 
 test('stopIfSame: an already-gone verified PID exits zero, but Idle still names its real stop failure', { skip: process.platform !== 'win32' && 'win32 only' }, () => {
-  const gone = exitedCmdRow();
+  const gone = neverAssignedRow(1_000_000);
   assert.doesNotThrow(() => runStopScript(racedStopScript([gone])), 'the one-row lookup-to-stop race is success');
-  assert.doesNotThrow(() => runStopScript(racedStopScript([gone, exitedCmdRow()])), 'every already-gone row in one list is success');
+  assert.doesNotThrow(() => runStopScript(racedStopScript([gone, neverAssignedRow(1_000_001)])), 'every already-gone row in one list is success');
   assert.throws(() => runStopScript(racedStopScript([R(0, 0, 0, 'Idle')])), /Idle|CouldNotStopProcess/, 'a real Stop-Process failure still identifies itself');
+});
+
+test('the raced stop script refuses a pid a real process can hold, before any PowerShell starts', { skip: process.platform !== 'win32' && 'win32 only' }, () => {
+  // the premise the gone rows rest on: a real pid (this process's, its parent's) is a multiple of 4
+  assert.deepStrictEqual([process.pid % 4, process.ppid % 4], [0, 0], 'Windows pids are multiples of 4');
+  for (const pid of [process.pid, process.ppid, 4, 8, 1, 3, -2, 2.5]) {
+    assert.throws(() => racedStopScript([R(pid, 0, 1, 'cmd.exe')]), /only takes a pid Windows never assigns/, `pid ${pid} is refused`);
+  }
+  assert.throws(() => racedStopScript([neverAssignedRow(5), R(process.pid, 0, 1, 'node.exe')]), /never assigns/, 'one live pid in the list refuses the list');
+  assert.throws(() => racedStopScript([R(0, 0, 0, 'cmd.exe')]), /never assigns/, 'pid 0 is allowed only as Idle');
 });
 
 test('watchdog: an OLDER node --test or test-file process under a recycled pid is not due', () => {
