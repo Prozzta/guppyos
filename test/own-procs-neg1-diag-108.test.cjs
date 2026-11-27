@@ -320,6 +320,7 @@ test('(gap D) savePsEvents asks for ids 400 and 403 five seconds either side of 
   assert.deepEqual(wrote, [['kept', file, '[{"id":400}]']]);
   assert.equal(ran.length, 1);
   assert.equal(ran[0], runner.psEventsScript(95_000, 205_000), 'FIVE SECONDS EITHER SIDE');
+  assert.match(ran[0], /record = \$_\.RecordId; pid = \$_\.ProcessId; message = \$_\.Message/, 'EACH ROW ASKS FOR THE RECORD\'S PROCESS ID, to tie a 400/403 pair to the failed child');
   assert.match(ran[0], /FromUnixTimeMilliseconds\(95000\)\.LocalDateTime[\s\S]*FromUnixTimeMilliseconds\(205000\)\.LocalDateTime/);
   assert.match(ran[0], /LogName = 'Windows PowerShell'; Id = 400, 403; StartTime = \$from; EndTime = \$to/);
   assert.equal(runner.savePsEvents('kept', 1, 2, { platform: 'linux', run: () => { throw new Error('RAN OFF WIN32'); } }), null, 'off win32 nothing runs');
@@ -334,5 +335,6 @@ test('(gap D) the real query runs and replies with a JSON array for the last min
     const rows = JSON.parse(fs.readFileSync(file, 'utf8'));
     assert.ok(Array.isArray(rows), 'a JSON array');
     for (const r of rows) assert.ok([400, 403].includes(r.id) && /^\d{4}-\d\d-\d\dT/.test(r.t) && typeof r.message === 'string', JSON.stringify(r).slice(0, 300));
+    for (const r of rows) assert.ok('pid' in r && (r.pid === null || Number.isInteger(r.pid)), `EACH ROW CARRIES THE RECORD'S PROCESS ID (or null): ${JSON.stringify(r).slice(0, 300)}`);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
