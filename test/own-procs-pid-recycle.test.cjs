@@ -39,8 +39,11 @@ const deps = (now = TABLE) => { const kills = []; return { kills, lookup: (pids)
  * FLAKE-PTY-CLOSETREE-PIDREUSE-ELECTRON-FILE-CRASH-108: the raced script has no identity check, so it stops whatever
  * process has the pid. It ran on the pids of exited cmd.exe children, which Windows may give to a new process at once (a
  * test file of the same run, which then dies with exit -1, no output and no .stops row, since this file runs the script
- * itself). It now takes only a pid Windows never assigns: Windows pids are multiples of 4, so 4n+2 is never a process.
- * The one other row allowed is Idle (pid 0), which Stop-Process can never stop.
+ * itself). It now takes only a pid Windows never assigns (pids are assigned as multiples of 4, so 4n+2). That is safe
+ * ONLY because the script's Stop-Process -Id looks the exact id up among the enumerated processes (.NET GetProcessById)
+ * and finds none. process.kill, taskkill /pid and a raw OpenProcess ignore the low 2 bits, so there 4n+2 would hit the
+ * live pid 4n: these rows must never go to any other kill path. The one other row allowed is Idle (pid 0), which
+ * Stop-Process can never stop.
  */
 const NEVER_ASSIGNED = (n) => 4 * n + 2;
 const neverAssignedRow = (n) => R(NEVER_ASSIGNED(n), 0, 1, 'cmd.exe');
@@ -48,7 +51,7 @@ function racedStopScript(rows) {
   for (const r of rows) {
     const idle = r.pid === 0 && r.name === 'Idle';
     assert.ok(idle || (Number.isInteger(r.pid) && r.pid > 0 && r.pid % 4 === 2),
-      `racedStopScript stops with no identity check, so it only takes a pid Windows never assigns (4n+2) or Idle; got ${r.pid}`);
+      `racedStopScript stops with no identity check, so it only takes a pid Windows never assigns (4n+2; safe only under Stop-Process -Id's exact-id lookup, never another kill path) or Idle; got ${r.pid}`);
   }
   const script = own.stopScript(rows);
   const identity = /if \(\$q -and [^\n]*\) \{\n/;
@@ -185,6 +188,9 @@ test('stopIfSame: an already-gone verified PID exits zero, but Idle still names 
 test('the raced stop script refuses a pid a real process can hold, before any PowerShell starts', { skip: process.platform !== 'win32' && 'win32 only' }, () => {
   // the premise the gone rows rest on: a real pid (this process's, its parent's) is a multiple of 4
   assert.deepStrictEqual([process.pid % 4, process.ppid % 4], [0, 0], 'Windows pids are multiples of 4');
+  // why the rows may go to Stop-Process -Id only: the kernel masks the low 2 bits, so a 4n+2 pid opens the live 4n
+  // (signal 0 kills nothing)
+  assert.doesNotThrow(() => process.kill(process.pid + 2, 0), 'process.kill resolves pid+2 to this process');
   for (const pid of [process.pid, process.ppid, 4, 8, 1, 3, -2, 2.5]) {
     assert.throws(() => racedStopScript([R(pid, 0, 1, 'cmd.exe')]), /only takes a pid Windows never assigns/, `pid ${pid} is refused`);
   }
