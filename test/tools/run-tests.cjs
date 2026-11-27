@@ -653,12 +653,16 @@ function psFailRows(stopsText) {
     .filter((r) => r && typeof r === 'object' && Number.isInteger(r.psFailed) && typeof r.file === 'string');
 }
 
-/** The script of savePsEvents: the 400 and 403 rows of the Windows PowerShell log between two epoch-ms times, as a JSON array. */
+/**
+ * The script of savePsEvents: the 400 and 403 rows of the Windows PowerShell log between two epoch-ms times, as a JSON array.
+ * `pid` is the record's own ProcessId, to tie a 400/403 pair to the failed child; this classic log may carry none
+ * (null or 0), and then the tie is by time and the message's HostApplication only.
+ */
 function psEventsScript(fromMs, toMs) {
   return `$from = [DateTimeOffset]::FromUnixTimeMilliseconds(${Math.floor(fromMs)}).LocalDateTime
 $to = [DateTimeOffset]::FromUnixTimeMilliseconds(${Math.ceil(toMs)}).LocalDateTime
 $ev = @(Get-WinEvent -FilterHashtable @{ LogName = 'Windows PowerShell'; Id = 400, 403; StartTime = $from; EndTime = $to } -ErrorAction SilentlyContinue)
-$rows = @($ev | ForEach-Object { [pscustomobject]@{ t = $_.TimeCreated.ToUniversalTime().ToString('o'); id = $_.Id; record = $_.RecordId; message = $_.Message } })
+$rows = @($ev | ForEach-Object { [pscustomobject]@{ t = $_.TimeCreated.ToUniversalTime().ToString('o'); id = $_.Id; record = $_.RecordId; pid = $_.ProcessId; message = $_.Message } })
 if ($rows.Count -eq 0) { '[]' } else { ConvertTo-Json -InputObject $rows -Compress }`;
 }
 
