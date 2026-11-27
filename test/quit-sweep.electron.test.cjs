@@ -99,11 +99,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   });
 
   try {
-    assert.notStrictEqual(exitCode, 'timeout', `electron fixture hung; output:\n${output}`);
-    assert.ok(fs.existsSync(pidFile), `fixture never wrote the pid file; output:\n${output}`);
+    // FLAKE-OWN-PROCS-POWERSHELL-EXIT-NEG1-EMPTY-108 (gap A): the fixture process has no journal; this file does.
+    // For an own-procs failure line in the fixture's output: what this file's stops and kills journals say of its child.
+    const named = own.namingForFixtureText(output);
+    assert.notStrictEqual(exitCode, 'timeout', `electron fixture hung; output:\n${output}${named}`);
+    assert.ok(fs.existsSync(pidFile), `fixture never wrote the pid file; output:\n${output}${named}`);
     const recorded = JSON.parse(fs.readFileSync(pidFile, 'utf8'));
-    assert.ok(!recorded.error, `fixture bailed: ${recorded.error}; output:\n${output}`);
-    assert.strictEqual(exitCode, 0, `electron exited ${exitCode}; output:\n${output}`);
+    assert.ok(!recorded.error, `fixture bailed: ${recorded.error}; output:\n${output}${named || own.namingForFixtureText(recorded.error)}`);
+    assert.strictEqual(exitCode, 0, `electron exited ${exitCode}; output:\n${output}${named}`);
     assert.ok(recorded.pids.length >= 2, `expected root+descendant, saw: ${recorded.pids.join(',')}`);
 
     // FLAKY-TIMING (Andy, flaky-170): a fixed sleep(500) raced the OS reaping what taskkill

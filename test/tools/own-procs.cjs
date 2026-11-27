@@ -180,7 +180,9 @@ ${script}`;
     // call, so the Windows PowerShell event log (engine start 400 / stop 403) can be matched to this one process.
     // (pid 0 is a spawn that itself failed: there was no child to name.)
     const child = Number.isInteger(err.pid) && err.pid > 0 ? ` [own-procs powershell child pid=${err.pid} started=${new Date(t0).toISOString()} ended=${new Date(t1).toISOString()}]` : '';
-    const why = `[own-procs powershell #${starts} failed after ${t1 - t0} ms: status=${err.status ?? null} signal=${err.signal ?? null} code=${err.code ?? null} stderr=${JSON.stringify(text(err.stderr).slice(0, 400))} stdout=${JSON.stringify(text(err.stdout).slice(0, 200))}]${child}${child ? stopsNaming(err.pid) : ''}`;
+    const why = `[own-procs powershell #${starts} failed after ${t1 - t0} ms: status=${err.status ?? null} signal=${err.signal ?? null} code=${err.code ?? null} stderr=${JSON.stringify(text(err.stderr).slice(0, 400))} stdout=${JSON.stringify(text(err.stdout).slice(0, 200))}]${child}${child ? stopsNaming(err.pid) + killsNaming(err.pid, t0) : ''}`;
+    // Gap D: one marker row, so the runner can tell a red leg that carried this line (it cannot see test output).
+    if (child) notePsFailure({ pid: err.pid, startedMs: t0, endedMs: t1, status: err.status ?? null });
     try { err.message = `${err.message} ${why}`; } catch { /* read-only message */ }
     err.powershellWhy = why;
     throw err;
@@ -255,7 +257,8 @@ function stopsNaming(pid) {
     if (!j) return '';
     let rows = [];
     try {
-      rows = fs.readFileSync(j.stops, 'utf8').split(/\r?\n/).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter((r) => r && typeof r === 'object');
+      rows = fs.readFileSync(j.stops, 'utf8').split(/\r?\n/).map((l) => { try { return JSON.parse(l); } catch { return null; } })
+        .filter((r) => r && typeof r === 'object' && !('psFailed' in r)); // a psFailed marker row is no stop
     } catch { /* no journal yet: no stop was handed over */ }
     const hit = rows.filter((r) => r.pid === pid);
     if (!hit.length) return ` [own-procs stops: none of ${rows.length} rows names pid ${pid}; a row means handed to a stop script, not stopped]`;
@@ -284,4 +287,39 @@ function killsNaming(pid, sinceMs = -Infinity) {
   } catch { return ''; }
 }
 
-module.exports = { runPowershell, ORPHAN_LEAD_MS, BIRTH_SLACK_MS, bornNow, parseRows, sameProcess, childrenOf, treeOf, ownTree, ownTreeOrThrow, cutAfter, stillOurs, readRec, killVerified, killOwnTree, processTable, lookupPids, stopScript, stopIfSame, powershellStarts, stopsNaming, killsNaming };
+/**
+ * FLAKE-OWN-PROCS-POWERSHELL-EXIT-NEG1-EMPTY-108 (gap D): the runner starts test files with inherited stdio, so
+ * it never sees a failure line. A failed lookup that had a child therefore leaves one MARKER row in <starts>.stops:
+ * { t, psFailed: <child pid>, startedMs, endedMs, status, file, by }. It has no `pid` field and stopsNaming does
+ * not count it. The runner reads it at the end of the leg (psFailRows in run-tests.cjs). Outside a run: nothing.
+ */
+function notePsFailure({ pid, startedMs, endedMs, status = null }) {
+  try {
+    const j = stopsJournal();
+    if (!j) return;
+    fs.appendFileSync(j.stops, `${JSON.stringify({ t: Date.now(), psFailed: pid, startedMs, endedMs, status, file: j.file, by: process.pid })}\n`);
+  } catch { /* the failure itself is still thrown */ }
+}
+/**
+ * Gap A: a fixture process (Electron, started by a test file) has no journal key, so its failure line ends at the
+ * child block. The OUTER test has the key: it passes the fixture's text here and appends what comes back. For each
+ * child block in `text` (once per pid and start): the stops and kills naming for that pid, and the gap D marker.
+ * '' when the text has no child block, or outside a run.
+ */
+const CHILD_BLOCK = /\[own-procs powershell child pid=(\d+) started=(\S+) ended=(\S+)\]/g;
+function namingForFixtureText(text) {
+  try {
+    if (!stopsJournal()) return '';
+    const seen = new Set(); let out = '';
+    for (const m of String(text || '').matchAll(CHILD_BLOCK)) {
+      const pid = Number(m[1]); const startedMs = Date.parse(m[2]); const endedMs = Date.parse(m[3]);
+      if (!(pid > 0) || !Number.isFinite(startedMs) || seen.has(`${pid}@${startedMs}`)) continue;
+      seen.add(`${pid}@${startedMs}`);
+      out += ` [fixture own-procs powershell child pid=${pid}, read from this test file's journals:${stopsNaming(pid)}${killsNaming(pid, startedMs)}]`;
+      notePsFailure({ pid, startedMs, endedMs: Number.isFinite(endedMs) ? endedMs : null });
+    }
+    return out;
+  } catch { return ''; }
+}
+
+module.exports = { notePsFailure, namingForFixtureText, runPowershell,ORPHAN_LEAD_MS, BIRTH_SLACK_MS, bornNow, parseRows, sameProcess, childrenOf, treeOf, ownTree, ownTreeOrThrow, cutAfter, stillOurs, readRec, killVerified, killOwnTree, processTable, lookupPids, stopScript, stopIfSame, powershellStarts, stopsNaming, killsNaming };
