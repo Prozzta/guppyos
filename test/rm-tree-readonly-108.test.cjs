@@ -167,6 +167,8 @@ const ALLOW = [
   { file: 'rm-tree-readonly-108.test.cjs', call: 'dir, { recursive: true, force: true }', reason: 'the RUNTIME PIN: the raw remove is the thing under test' },
   { file: 'worktree-remove-junction-191.test.cjs', call: 'scratch, { recursive: true, force: true }', reason: 'pins what a raw rmSync does to a junction; the scratch folder holds no read-only file' },
   { file: 'related-tests-198.test.cjs', call: 'baseTree, { recursive: true, force: true }', reason: 'a mutant search string: text of scripts/related-tests.cjs, not a call in the test' },
+  { file: 'test-temp-hygiene.test.cjs', call: 'd,{recursive:true}', reason: 'a fixture string for the runner temp-leak test, not a remove in this test process' },
+  { file: 'test-temp-hygiene.test.cjs', call: 'cache, { recursive: true }', reason: 'a scanner-mutant fixture string, not a remove in this test process' },
 ];
 
 function argsAt(text, open) {
