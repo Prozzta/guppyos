@@ -635,7 +635,7 @@ function noteCodexPopup(ptyId: string, incarnation: unknown, text: string | null
     if (!edge) return;
     sampleLiveness(agentId);
     if (edge !== 'raised') return;
-    const t = setTimeout(() => { void floorDigest.run().catch(() => undefined); }, CODEX_POPUP_SETTLE_MS + 1_000);
+    const t = setTimeout(() => { void floorDigest.run().catch((e) => { console.error('[floor-digest]', e); }); }, CODEX_POPUP_SETTLE_MS + 1_000);
     t.unref?.();
   } catch { /* diagnostics never decide */ }
 }
@@ -3021,13 +3021,13 @@ function teardownPty(id: string, archiveReason: ArchiveReason = 'explicit'): voi
     // Drop watchdog state so a dead agent can't get nudged or leak its grace.
     try { workerWake.forget(agentId, id); } catch { /* best-effort */ }
     try { forgetWakeRows(wakeRows, agentId); } catch { /* best-effort */ }
-    // WAKE-CODEX-MODAL-PROMPT-BLOCKS-108: a popup goes with the terminal it was on.
-    try { codexPopups.forget(agentId); } catch { /* best-effort */ }
     // ZT-I1-MAIL §1.1: the PTY exited (or crashed): its open mail epoch ends abnormally. Not when
     // another PTY of the same agent is alive (a restart in place spawns the new one first).
     if (![...ptyToAgent.values()].includes(agentId)) { try { hookServer.abortMailTurn(agentId, 'pty-exit'); } catch { /* best-effort */ } }
     // GTC M3: likewise the message box's session mark, pending confirm and waits.
     if (![...ptyToAgent.values()].includes(agentId)) { try { messageBox?.forget(agentId); } catch { /* best-effort */ } }
+    // WAKE-CODEX-MODAL-PROMPT-BLOCKS-108: a popup goes with the terminal it was on.
+    try { codexPopups.forget(agentId); } catch { /* best-effort */ }
     try { nativeMemory.agentExited(agentId); } catch { /* best-effort */ }
     // HEAVY-JOB-SERIALIZE: its jobs went with the PTY (unless another PTY of it is still alive).
     if (![...ptyToAgent.values()].includes(agentId)) { try { heavyLock.agentGone(agentId); } catch { /* best-effort */ } }
