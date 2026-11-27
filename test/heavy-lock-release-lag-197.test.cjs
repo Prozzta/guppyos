@@ -536,6 +536,9 @@ async function liveRelease(t, o) {
   // nothing was killed and the job ran its 30 s out ("none listed"). Now it lists until the shell itself is among
   // the members (it has joined), the shell has gone, or the list failed; every list is recorded for the diagnostic.
   const lists = [];
+  let killList = null;       // the first list the kill loop worked from, as it read it (diagnostic)
+  let unidentified = null;   // the first member with no identity on two kill lists: never killed
+  let rigKill = null;        // o.noName only: the exit code of the rig's own kill of that member
   let shellGone = false;
   sh.on('exit', () => { shellGone = true; });
   const listOnce = () => new Promise((resolve) => {
@@ -560,10 +563,24 @@ async function liveRelease(t, o) {
       // A single list can miss a child that has not spawned yet (FLAKE-LAG197-KILL-NONE-LISTED-108, 2nd): after the
       // kills have ended, list again and kill whatever is new, until a list shows nothing new (or fails).
       const seen = new Set();
+      // FLAKE-LAG197-LATE-JOIN-SLOT-NOT-FREED-108: a kill that returned MEMBER_NO_IDENTITY killed nothing (the list row had
+      // no name or no birth time: the job tool reads the names before the members, so a member born in between has name '').
+      // Such a member is not "seen": the next list, which has its whole row, kills it. One that has no identity on a second
+      // list ends the loop and is a red by name (assertIdentified), never a kill counted that was not made.
+      const noIdentity = new Map();   // pid -> the kill lists that gave it no identity
+      // o.noName (test rig mutant, red-before): the body's sleep has no name on its first N kill lists, as from the job tool.
+      const shown = new Map();
       let round = 0;
       for (;;) {
         round += 1;
-        const fresh = rec.members.filter((m) => !seen.has(m.pid));
+        const members = rec.members.map((m) => {
+          if (!o.noName || !/^sleep(\.exe)?$/i.test(String(m.name))) return m;
+          const n = (shown.get(m.pid) || 0) + 1;
+          shown.set(m.pid, n);
+          return n <= o.noName ? { ...m, name: '' } : m;
+        });
+        if (killList === null) killList = members;
+        const fresh = members.filter((m) => !seen.has(m.pid));
         if (!fresh.length) break;
         const ended = [];
         for (const row of fresh) {
@@ -575,7 +592,17 @@ async function liveRelease(t, o) {
             const end = () => { if (k.endedAt === null) k.endedAt = Date.now(); done(); };
             const go = () => {
               k.sentAt = Date.now();
-              killMember(row).then((code) => { if (k.code === null) k.code = code; end(); });
+              killMember(row).then((code) => {
+                if (k.code === null) k.code = code;
+                if (code === MEMBER_NO_IDENTITY) {
+                  // nothing was killed: not "seen", so the next list's row kills it; a second time ends the loop, by name
+                  seen.delete(pid);
+                  const n = (noIdentity.get(pid) || 0) + 1;
+                  noIdentity.set(pid, n);
+                  if (n >= 2 && !unidentified) unidentified = { pid, name: row.name, createdMs: row.createdMs };
+                }
+                end();
+              });
             };
             // One kill, from its start to the tool's exit. o.slowKill: the kill tool takes this long
             // per process, as taskkill does on a loaded machine.
@@ -588,6 +615,11 @@ async function liveRelease(t, o) {
           }));
         }
         await Promise.all(ended);
+        if (unidentified) {
+          // The rig's own mutant: the real row has an identity, so the member is ended here and no sleep outlives the cell.
+          if (o.noName) rigKill = await killMember(rec.members.find((m) => m.pid === unidentified.pid));
+          break;
+        }
         rec = await listOnce();
         if (rec.error) break;
       }
@@ -618,14 +650,15 @@ async function liveRelease(t, o) {
   const lastSent = kills.reduce((m, k) => (k.sentAt !== null && k.sentAt > m.at ? { at: k.sentAt, pid: k.pid } : m), { at: 0, pid: null });   // seeded 0, not exitAt: exitAt is when this process SAW the exit (late under load), not a kill's send time
   const deadline = jobEndAt + 6_000;
   // A late member with a stamp missing is not watched at all: there is no exit to open the window at.
-  while (memberEnded && lock.snapshot().length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+  // A member that was never killed keeps the job, so there is no release to wait for: the red is by name, at once.
+  while (memberEnded && !unidentified && lock.snapshot().length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
   const rel = rows.find((r) => r.kind === 'heavy-lock' && r.action === 'release');
   // Diagnostic only, and only for a slot that was not freed (or a late member with a stamp missing): who is still in the
   // job. Read after `rel`, so the list's own time cannot turn a missing release into a found one; kept out of `lists`,
   // which records the kill's lists.
   let stillIn = null;
   if (!rel || !memberEnded) { stillIn = await listOnce(); lists.pop(); }
-  return { member, helperTrace, stillIn, lagMs: rel ? rel.ts - exitAt : null, relAt: rel ? rel.ts : null, lastSentAt: lastSent.at, lastSentPid: lastSent.pid, afterEndMs: rel ? rel.ts - jobEndAt : null, exitAt, jobEndAt, runMs: exitAt - t0, heldMs: rel ? rel.heldMs : null, reason: rel ? rel.reason : null, rows, shellAliveAtRelease, code: exit.code, signal: exit.signal, kills, shellPid: sh.pid, lists, t0 };
+  return { member, helperTrace, stillIn, lagMs: rel ? rel.ts - exitAt : null, relAt: rel ? rel.ts : null, lastSentAt: lastSent.at, lastSentPid: lastSent.pid, afterEndMs: rel ? rel.ts - jobEndAt : null, exitAt, jobEndAt, runMs: exitAt - t0, heldMs: rel ? rel.heldMs : null, reason: rel ? rel.reason : null, rows, shellAliveAtRelease, code: exit.code, signal: exit.signal, kills, shellPid: sh.pid, lists, t0, killList, unidentified, rigKill };
 }
 
 /** LAG197-MEMBER-KILL-IDENTITY-108: ends one member the job tool listed (a row { pid, name, createdMs }), and only while
@@ -670,9 +703,22 @@ const KILLED_EXIT = 1;
 
 /** The shell ended BECAUSE it was killed: the fact `runMs < 10 s` stood in for. */
 function assertKilled(r, what) {
+  assertIdentified(r, what);
   assert.ok(r.kills.length > 0, `${what}: THE JOB LISTED ITS PROCESSES AND A KILL WAS SENT TO EACH (none listed; ${listsText(r)})`);
   assert.equal(r.signal, null, `${what}: the shell's exit carries no signal`);
   assert.equal(r.code, KILLED_EXIT, `${what}: THE KILL ENDED THE JOB (exit code ${r.code}; a killed shell reports ${KILLED_EXIT}, one that ran out on its own reports 0)`);
+}
+
+/** FLAKE-LAG197-LATE-JOIN-SLOT-NOT-FREED-108: every member the kill loop listed was killed or was gone. A member whose row
+ *  had no identity on two lists was never killed; that is this rig's red, by name, and never the product's "not freed". */
+function assertIdentified(r, what) {
+  const u = r.unidentified;
+  assert.ok(!u, `${what}: EVERY LISTED MEMBER HAS AN IDENTITY TO KILL IT BY (member ${u?.pid} name '${u?.name}' createdMs ${u?.createdMs} HAD NO IDENTITY ON TWO LISTS and was never killed; ${killListText(r)}; kills ${killsText(r)})`);
+}
+
+/** The first list the kill loop worked from, row by row: a row with name '' or createdMs 0 cannot be killed by identity. */
+function killListText(r) {
+  return `the first kill list: ${r.killList ? r.killList.map((m) => `${m.pid} '${m.name}' ${m.createdMs}`).join(', ') || 'no rows' : 'none'}`;
 }
 
 /** Every list of the job, from the spawn: when it ran, how long it took, and what came back. */
@@ -695,10 +741,11 @@ function notFreedText(r) {
   const members = !s ? 'not listed' : s.error ? `list error ${s.error}` : `list exit ${s.code} in ${s.ms} ms, ${s.rows} rows [${s.pids.join(', ')}], ${s.unparsed} unparsed`;
   const rows = (r.rows ?? []).map((x) => `${at(x.ts)} ${[x.kind, x.action, x.job, x.state, x.reason, x.by, x.what, x.error].filter((v) => v !== undefined && v !== null).join('/')}`).join(' | ');
   const helper = (r.helperTrace ?? []).map((x) => `${at(x.at)} #${x.n} ${x.what}`).join(' | ');
-  return `; in the job at the deadline: ${members}; rows: ${rows || 'none'}; helper: ${helper || 'none recorded'}`;
+  return `; ${killListText(r)}; in the job at the deadline: ${members}; rows: ${rows || 'none'}; helper: ${helper || 'none recorded'}`;
 }
 
 function assertFreed(r, what) {
+  assertIdentified(r, what);
   const kills = r.kills.length ? `; kills (ms from the shell's exit) ${killsText(r)}; the job ended ${r.jobEndAt - r.exitAt} ms after the shell` : '';
   assert.ok(r.afterEndMs !== null, `${what}: THE SLOT IS FREED WITHIN 2 S OF THE JOB'S EXIT (not freed 6 s after the job's last process ended${kills}${r.afterEndMs !== null ? '' : notFreedText(r)})`);
   // FLAKE-LAG197-NOPORT-KILL-EARLY-RELEASE-108: one clock. The exit time this process saw (exitAt) is when its event loop got
@@ -982,6 +1029,43 @@ test('LIVE: a child that spawns after the job was listed is killed too', { skip:
   t.diagnostic(`late child: ran ${r.runMs} ms, held ${r.heldMs} ms, freed ${r.lagMs} ms after the exit; shell exit code ${r.code}, signal ${r.signal}, ${r.kills.length} killed (${killsText(r)}); lists: ${listsText(r)}`);
   assertKilled(r, 'late child');
   assertFreed(r, 'late child');
+});
+
+// FLAKE-LAG197-LATE-JOIN-SLOT-NOT-FREED-108: the suite's red was this rig's own. The list that showed the shell had joined
+// also showed the body's `sleep 30` at its birth, with no identity; its kill returned MEMBER_NO_IDENTITY at once, killed
+// nothing, and the loop counted the member as handled. It lived, and the product rightly kept the slot ("not freed").
+// o.noName: the rig gives the sleep's row no name on its first N kill lists.
+test('LIVE: a member listed with no identity is killed from the next list, never counted as killed', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
+  const r = await liveRelease(t, { body: 'sleep 30', kill: 1_500, noName: 1 });
+  t.diagnostic(`no name once: ran ${r.runMs} ms, held ${r.heldMs} ms, freed ${r.lagMs} ms after the exit; shell exit code ${r.code}, ${r.kills.length} kills (${killsText(r)}); ${killListText(r)}`);
+  // not vacuous: one member's first kill was the no-identity return, and a later round then really killed that pid
+  const blank = r.kills.find((k) => k.code === MEMBER_NO_IDENTITY);
+  assert.ok(blank, `THE RIG GAVE ONE MEMBER NO IDENTITY ON THE FIRST LIST (kills ${killsText(r)}; ${killListText(r)})`);
+  assert.ok(r.kills.some((k) => k.pid === blank.pid && k.round > blank.round && k.code === 0), `THE NEXT LIST KILLS THE MEMBER THE FIRST COULD NOT IDENTIFY (kills ${killsText(r)})`);
+  assertKilled(r, 'no name once');
+  assertFreed(r, 'no name once');
+});
+
+test('LIVE: a member with no identity on two lists is a red by name, at once', { skip: LIVE_SKIP, timeout: 60_000 }, async (t) => {
+  const r = await liveRelease(t, { body: 'sleep 30', kill: 1_500, noName: Infinity });
+  t.diagnostic(`no name ever: ran ${r.runMs} ms; shell exit code ${r.code}, ${r.kills.length} kills (${killsText(r)}); ${killListText(r)}; unidentified ${JSON.stringify(r.unidentified)}; the rig's own kill exit ${r.rigKill}`);
+  assert.ok(r.unidentified, `THE LOOP ENDS ON THE MEMBER IT COULD NOT IDENTIFY TWICE (kills ${killsText(r)}; ${killListText(r)})`);
+  assert.equal(r.kills.filter((k) => k.pid === r.unidentified.pid && k.code === MEMBER_NO_IDENTITY).length, 2, `two tries, then the red (kills ${killsText(r)})`);
+  const named = new RegExp(`member ${r.unidentified.pid} name '' createdMs ${r.unidentified.createdMs} HAD NO IDENTITY ON TWO LISTS`);
+  assert.throws(() => assertKilled(r, 'x'), named);
+  assert.throws(() => assertFreed(r, 'x'), named);
+  // nothing of this cell outlives it: the rig ended the member by its real row
+  assert.equal(r.rigKill, 0, `THE RIG ENDED THE MEMBER BY ITS REAL ROW (kill exit ${r.rigKill})`);
+});
+
+test('the identity check passes a record with every member killed and fails one that names an unkilled member', () => {
+  const kills = [{ pid: 1, startedAt: 1, endedAt: 2 }];
+  const base = { code: KILLED_EXIT, signal: null, kills, exitAt: 0, shellPid: 1 };
+  assert.doesNotThrow(() => assertKilled({ ...base, unidentified: null }, 'x'));
+  const bad = { ...base, unidentified: { pid: 7, name: '', createdMs: 5 }, killList: [{ pid: 1, name: 'bash.exe', createdMs: 4 }, { pid: 7, name: '', createdMs: 5 }] };
+  assert.throws(() => assertKilled(bad, 'x'), /member 7 name '' createdMs 5 HAD NO IDENTITY ON TWO LISTS.*the first kill list: 1 'bash\.exe' 4, 7 '' 5/s);
+  assert.throws(() => assertFreed(bad, 'x'), /member 7 name '' createdMs 5 HAD NO IDENTITY ON TWO LISTS/);
+  assert.match(killListText({ killList: null }), /the first kill list: none/);
 });
 
 test('the killed check fails a shell that ran out on its own, and one nothing was killed in', () => {
