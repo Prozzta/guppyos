@@ -209,6 +209,8 @@ import { HeldInterferenceWatch, HELD_TICK_MS, heldWakesOf } from './heldInterfer
 import { findSilentTurns, type SilentTurnFacts } from './silentTurn';
 import { QuietRefusalWatch } from './quietRefusalWatch';
 import { RefusedSettleWatch } from './refusedSettleWatch';
+import { CodexPopupWatch, CODEX_POPUP_SETTLE_MS, type CodexPopupSource } from './codexPopupWatch';
+import { popupInReason } from '../shared/codexScreen';
 import type { SilentTurnView } from '../shared/agentBadges';
 import { CodexRolloutLifecycleSource, threadSettingsAppliedSince } from './codexRolloutLifecycle';
 import { CodexRolloutCapacitySource, codexUserMessageMatches, findNewestRollout } from './codexRolloutCapacity';
@@ -614,6 +616,29 @@ const refusedLive = {
   pending: (agentId: string) => mailPendingIds(agentId).length,
   incarnation: (agentId: string) => { const p = ptyForAgent(agentId); return p ? ptyManager.incarnation(p) : undefined; }
 };
+/** WAKE-CODEX-MODAL-PROMPT-BLOCKS-108: the Codex popup on each agent's screen, as the startup
+ *  reading and the screen gate read it. It feeds liveness and the digest (a decision for god that
+ *  names the popup). Observation only: nothing here types into a terminal or answers a popup. */
+const codexPopups = new CodexPopupWatch((row) => { try { hive.appendLog(row); } catch { /* logging only */ } });
+/** A sighting ends at read time once the PTY is another incarnation or a hook has arrived since. */
+const popupLive = {
+  incarnation: (agentId: string) => { const p = ptyForAgent(agentId); return p ? ptyManager.incarnation(p) : undefined; },
+  lastHookAt: (agentId: string) => workerWake.livenessFacts(agentId).lastHookAt
+};
+/** One popup reading for the PTY's agent. A new popup re-samples liveness at once and asks for one
+ *  digest run just after the settle time, so god hears of it then, not at the next 5-minute beat. */
+function noteCodexPopup(ptyId: string, incarnation: unknown, text: string | null, source: CodexPopupSource): void {
+  try {
+    const agentId = ptyToAgent.get(ptyId);
+    if (!agentId) return;
+    const edge = codexPopups.note(agentId, typeof incarnation === 'number' ? incarnation : null, text, source, Date.now());
+    if (!edge) return;
+    sampleLiveness(agentId);
+    if (edge !== 'raised') return;
+    const t = setTimeout(() => { void floorDigest.run().catch(() => undefined); }, CODEX_POPUP_SETTLE_MS + 1_000);
+    t.unref?.();
+  } catch { /* diagnostics never decide */ }
+}
 /** MIRROR-STARTUP-196: the armed mirror cost guard (null before arming, or with the mirror off by
  *  config). Declared before the digest, which reads it. */
 let mirrorGuard: MirrorCostGuard | null = null;
@@ -638,6 +663,8 @@ const floorDigest = new FloorDigest({
   quietStalls: () => quietRefusals.stalls().map((q) => ({ ...q, name: agentDisplayName(q.agentId) })),
   wakeStalls: () => wakeStalls.stalls().map((s) => ({ ...s, name: agentDisplayName(s.agentId) })),
   refusedSettles: () => refusedSettles.stalls(refusedLive).map((s) => ({ ...s, name: agentDisplayName(s.agentId) })),
+  // WAKE-CODEX-MODAL-PROMPT-BLOCKS-108: a Codex popup that has stayed up, named for god.
+  codexPopups: () => codexPopups.popups(Date.now(), popupLive).map((p) => ({ agentId: p.agentId, name: agentDisplayName(p.agentId), incarnation: p.incarnation, text: p.text, since: p.since })),
   // GTC M3: the Human's message-box items that need a look (never retried by the box).
   messageBox: () => (messageBox?.attentionItems() ?? []).map((m) => ({ ...m, name: agentDisplayName(m.agentId) })),
   // RULE-FIX-HOOK-NO-MODEL: model-invoking hooks in files Guppy does not own (warn only).
@@ -839,7 +866,9 @@ function livenessFactsFor(agentId: string): LivenessFacts | null {
     wake,
     control: { paused: snap.paused, halted: snap.halted, autoDeliveryPaused: snap.autoDeliveryPaused },
     mailWaiting,
-    ...(rollout !== undefined ? { rollout } : {})
+    ...(rollout !== undefined ? { rollout } : {}),
+    // WAKE-CODEX-MODAL-PROMPT-BLOCKS-108: a popup read on this incarnation and not answered since.
+    ...(ptyId && pf && codexPopups.current(agentId, Date.now(), popupLive) ? { screenPopup: true } : {})
   };
 }
 const agentLiveness = new AgentLivenessMonitor({
@@ -1072,6 +1101,10 @@ function noteScreenGuard(r: ScreenGuardRecord): void {
     // admission lifts the hold and its notice.
     screenGuardNotices.reading(r.agentId, r.ok, r.reason, r.admissionClass === 'CAPACITY_GATED', Date.now());
   } catch { /* diagnostics never decide */ }
+  // WAKE-CODEX-MODAL-PROMPT-BLOCKS-108: the gate read a popup, or admitted (so none is up). Any
+  // other refusal says nothing about a popup and changes nothing.
+  const popup = r.ok ? null : popupInReason(r.reason);
+  if (r.ok || popup !== null) noteCodexPopup(r.ptyId, r.incarnation, popup, 'gate');
 }
 const automaticSubmit = new AutomaticSubmitOwner(buildOwnerDeps({
   pty: ptyManager,
@@ -1104,6 +1137,8 @@ const automaticSubmit = new AutomaticSubmitOwner(buildOwnerDeps({
       });
     } catch { /* diagnostics never decide */ }
   },
+  // WAKE-CODEX-MODAL-PROMPT-BLOCKS-108: what each Codex startup reading saw of a popup.
+  onStartupPopup: (r) => noteCodexPopup(r.ptyId, r.incarnation, r.popup, 'startup'),
   // DWIGHT-HELD-INTERFERED fix 4: every INTERFERED hold, with the last screen facts seen.
   onInterfered: (r) => {
     try {
@@ -2983,6 +3018,8 @@ function teardownPty(id: string, archiveReason: ArchiveReason = 'explicit'): voi
     }
     // WAKE-STUCK-REFUSAL-ESCALATE (Jim SHOULD1): its refused-wake run, if any, ends with the PTY.
     try { refusedSettles.forget(agentId); } catch { /* best-effort */ }
+    // WAKE-CODEX-MODAL-PROMPT-BLOCKS-108: a popup goes with the terminal it was on.
+    try { codexPopups.forget(agentId); } catch { /* best-effort */ }
     // Drop watchdog state so a dead agent can't get nudged or leak its grace.
     try { workerWake.forget(agentId, id); } catch { /* best-effort */ }
     try { forgetWakeRows(wakeRows, agentId); } catch { /* best-effort */ }
