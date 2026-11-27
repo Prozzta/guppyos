@@ -506,8 +506,9 @@ test('main wiring: the five paths use the answers above', () => {
   assert.match(index, /ipcMain\.handle\('hive:cardBadges', \(\) => cardBadgesFromFleet\(hive\.fleetSnapshotView\(\), boardMonitor\.flags\(\)\)\);/, 'hive:cardBadges answers from the kept snapshot');
   assert.match(index, /silentTurn: silent\[id\] \?\? null,/, 'the snapshot rows carry the silent turn');
   assert.match(index, /\.\.\.fleetMail\(id\),/, 'and the mail fields');
-  assert.equal((index.match(/floorDigest\.run\(\)/g) ?? []).length, 2);
-  assert.equal((index.match(/void floorDigest\.run\(\)\.catch\(\(e\) => \{ console\.error\('\[floor-digest\]', e\); \}\);/g) ?? []).length, 2, 'both callers start the async run and report its failure');
+  // WAKE-CODEX-MODAL-PROMPT-BLOCKS-108 added the third caller: the run a settled Codex popup asks for.
+  assert.equal((index.match(/floorDigest\.run\(\)/g) ?? []).length, 3);
+  assert.equal((index.match(/void floorDigest\.run\(\)\.catch\(\(e\) => \{ console\.error\('\[floor-digest\]', e\); \}\);/g) ?? []).length, 3, 'every caller starts the async run and reports its failure');
   assert.match(index, /ipcMain\.handle\('hive:floorDigest', async \(\) => \{\n\s+const root = hive\.root\(\);\n\s+if \(!root\) return '';\n\s+try \{ return await readFileTracked\(join\(root, FLOOR_DIGEST_FILE\), 'utf8'\); \} catch \{ return ''; \}\n\}\);/, 'the Floor panel read is async');
   assert.match(index, /ipcMain\.handle\('hive:log', \(_evt, n: unknown\) => hive\.logTailAsync\(typeof n === 'number' \? n : 200\)\);/, 'the log poll is async');
   assert.doesNotMatch(index, /readSourcesConfig\(/, 'main reads memory-sources.json through the cache only');
