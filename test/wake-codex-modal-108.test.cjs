@@ -98,7 +98,7 @@ function t1(mod) {
   assert.equal(r.watch.current(DWIGHT, T_SEEN, r.liveOf).text, POPUP_TEXT, 'up at once for liveness');
   assert.deepEqual(r.watch.popups(T_SEEN + mod.CODEX_POPUP_SETTLE_MS - 1, r.liveOf), [], 'not a decision before it has stayed up');
   // The same popup read again (a redraw, a refused wake) is the same popup: no row, same start.
-  assert.equal(r.watch.note(DWIGHT, 7, POPUP_TEXT, 'gate', T_SEEN + mod.CODEX_POPUP_SETTLE_MS - 1), null);
+  assert.equal(r.watch.note(DWIGHT, 7, POPUP_TEXT, 'gate', T_SEEN + mod.CODEX_POPUP_SETTLE_MS - 1), null, 'a re-read is the same popup');
   assert.equal(r.rows.length, 1);
   const up = r.watch.popups(T_SEEN + mod.CODEX_POPUP_SETTLE_MS, r.liveOf);
   assert.equal(up.length, 1, 'a decision once it has stayed up for the settle time');
@@ -111,7 +111,7 @@ function t2(mod) {
   const r = watchRig(mod);
   r.watch.note(DWIGHT, 7, POPUP_TEXT, 'startup', T_SEEN);
   assert.equal(r.watch.note(DWIGHT, 7, null, 'startup', T_POST), 'cleared');
-  assert.deepEqual(r.rows[1], { kind: 'codex-popup-cleared', agentId: DWIGHT, incarnation: 7, popup: POPUP_TEXT, why: 'startup', upMs: T_POST - T_SEEN });
+  assert.deepEqual(r.rows[1], { kind: 'codex-popup-cleared', agentId: DWIGHT, incarnation: 7, popup: POPUP_TEXT, why: 'startup', upMs: T_POST - T_SEEN }, 'the end is a row saying how long it was up');
   assert.equal(r.watch.current(DWIGHT, T_POST, r.liveOf), null);
   assert.deepEqual(r.watch.popups(T_POST + 10 * MIN, r.liveOf), []);
   assert.equal(r.watch.note(DWIGHT, 7, null, 'gate', T_POST + 1), null, 'no popup, nothing to clear');
@@ -152,18 +152,65 @@ function t4(mod) {
   assert.equal(r.watch.note(DWIGHT, 8, 'Update available', 'startup', T_SEEN + 2 * MIN), 'raised', 'the same question on a new incarnation');
   assert.equal(r.watch.current(DWIGHT, T_SEEN + 2 * MIN, r.liveOf).since, T_SEEN + 2 * MIN);
   r.watch.forget(DWIGHT);
-  assert.equal(r.watch.current(DWIGHT, T_SEEN + 2 * MIN, r.liveOf), null);
+  assert.equal(r.watch.current(DWIGHT, T_SEEN + 2 * MIN, r.liveOf), null, 'forget drops the popup');
   assert.equal(r.watch.note('', 7, POPUP_TEXT, 'startup', T_SEEN), null, 'no agent, no sighting');
 }
 test('t4 another text or incarnation is a new popup; forget drops it', () => t4(W));
+
+// ---------------------------------------------------------------- t9 one popup, two wordings (Jim SHOULD B)
+// codexPopupText is `<title> — <question>`; the question row is read only when the tail holds it.
+function t9(mod) {
+  const TITLE = 'Approaching rate limits';
+  const FULL = `${TITLE} — Switch to a smaller model for lower credit usage?`;
+  const r = watchRig(mod);
+  assert.equal(r.watch.note(DWIGHT, 7, FULL, 'startup', T_SEEN), 'raised');
+  assert.equal(r.watch.note(DWIGHT, 7, TITLE, 'gate', T_SEEN + MIN), null, 'the title alone is the same popup');
+  const s = r.watch.current(DWIGHT, T_SEEN + MIN, r.liveOf);
+  assert.deepEqual([s.since, s.seenAt, s.text], [T_SEEN, T_SEEN + MIN, TITLE], 'the same start and the newest text');
+  assert.equal(r.watch.note(DWIGHT, 7, FULL, 'startup', T_SEEN + 2 * MIN), null, 'the title alone is the same popup');
+  assert.equal(r.rows.length, 1, 'one popup, one row');
+  assert.equal(r.watch.popups(T_SEEN + 2 * MIN, r.liveOf)[0].since, T_SEEN, 'the settle time and the digest id do not restart');
+
+  // A long title is cut with an ellipsis: with the question the cut falls one earlier.
+  const c = watchRig(mod);
+  const T158 = 'y'.repeat(158);
+  c.watch.note(DWIGHT, 7, T158, 'startup', T_SEEN);
+  assert.equal(c.watch.note(DWIGHT, 7, `${T158} …`, 'gate', T_SEEN + 1), null, 'a text cut inside the separator is the same title');
+  const T160 = 'z'.repeat(160);
+  assert.equal(c.watch.note(DWIGHT, 7, T160, 'gate', T_SEEN + 2), 'raised');
+  assert.equal(c.watch.note(DWIGHT, 7, `${T160.slice(0, 159)}…`, 'gate', T_SEEN + 3), null, 'a cut title matches the title it starts');
+  assert.equal(c.watch.note(DWIGHT, 7, `${'q'.repeat(159)}…`, 'gate', T_SEEN + 4), 'raised', 'a cut title that starts another title is another popup');
+  assert.equal(mod.samePopup('Update available', TITLE), false);
+  assert.equal(mod.samePopup(`${TITLE} — A?`, `${TITLE} — B?`), true, 'one title, one popup');
+}
+test('t9 the same popup read with and without its question row is one popup (same start, newest text)', () => t9(W));
+
+// ---------------------------------------------------------------- t10 the gate: refused, then admitted (Jim SHOULD A)
+function t10(mod) {
+  const r = watchRig(mod);
+  // index.ts noteScreenGuard, as it is wired: the gate record -> gatePopupReading -> the watch.
+  const gate = (ok, reason, now) => {
+    const reading = mod.gatePopupReading(ok, ok ? null : SHARED.popupInReason(reason));
+    return reading === undefined ? 'silent' : r.watch.note(DWIGHT, 7, reading, 'gate', now);
+  };
+  assert.equal(gate(false, GATE_REASON, T_GATE), 'raised', 'a refusal naming a popup raises it');
+  assert.equal(gate(false, 'startup:header-loading', T_GATE + 1000), 'silent', 'a refusal for another reason says nothing');
+  assert.equal(r.watch.current(DWIGHT, T_GATE + 1000, r.liveOf).since, T_GATE, 'and the popup stays up');
+  assert.equal(gate(false, GATE_REASON, T_GATE + 2000), null, 'refused again: the same popup');
+  assert.equal(gate(true, 'ready', T_GATE + 3000), 'cleared', 'THE RETRIED WAKE IS ADMITTED: the popup is over');
+  assert.equal(r.watch.current(DWIGHT, T_GATE + 3000, r.liveOf), null);
+  assert.deepEqual(r.rows.map((x) => [x.kind, x.why ?? x.source]), [['codex-popup-seen', 'gate'], ['codex-popup-cleared', 'gate']]);
+  assert.equal(gate(true, 'ready', T_GATE + 4000), null, 'an admission with no popup up changes nothing');
+}
+test('t10 a wake refused on a popup and admitted on the retry ends the sighting; another refusal leaves it', () => t10(W));
 
 // ---------------------------------------------------------------- t5 the digest decision
 function t5(fd) {
   const now = T_SEEN + 5 * MIN;
   const popup = { agentId: DWIGHT, name: 'Dwight', incarnation: 7, text: POPUP_TEXT, since: T_SEEN };
   const item = fd.codexPopupItem(popup, now);
-  assert.equal(item.id, `codex-popup:${DWIGHT}:7:${T_SEEN}`);
-  assert.equal(item.urgent, true);
+  assert.equal(item.id, `codex-popup:${DWIGHT}:7:${T_SEEN}`, 'the id carries the popup\'s start');
+  assert.equal(item.urgent, true, 'the popup item is urgent');
   assert.equal(item.cardId, null);
   assert.ok(item.line.startsWith('Dwight: Codex has had a popup up for '), item.line);
   assert.ok(item.line.includes(`"${POPUP_TEXT}"`), 'the popup is named');
@@ -185,8 +232,8 @@ function t5(fd) {
     `codex-popup:${DWIGHT}:7:${T_SEEN}`,
     `wake-stall:andy:${T_SEEN}`,
     `wake-refusal-stuck:sele:pty-sele#2:${T_SEEN}`
-  ]);
-  assert.deepEqual(fd.decisionItems([], [], now, [], [], [], [], [refused[0]], [popup]).map((i) => i.id), [`codex-popup:${DWIGHT}:7:${T_SEEN}`]);
+  ], 'one item for Dwight, not three');
+  assert.deepEqual(fd.decisionItems([], [], now, [], [], [], [], [refused[0]], [popup]).map((i) => i.id), [`codex-popup:${DWIGHT}:7:${T_SEEN}`], 'the refused settle alone is replaced too');
   // Without a popup nothing changes for anyone.
   assert.equal(fd.decisionItems([], [], now, [], [], [], wakeStalls, refused).length, 3);
   const md = fd.buildFloorDigest({ tasks: [], meta: {}, flags: [], ledgerIssues: [], agents: [], now, codexPopups: [popup] }).markdown;
@@ -312,7 +359,7 @@ async function t8(mod) {
   // Someone answered it (Dwight: generation 38, the composer with its status line).
   r.facts = POST_FACTS; r.gen = 38; r.now = T_POST;
   await r.settle(r.owner.observeStartup('p1'));
-  assert.deepEqual(r.popups[2], { ptyId: 'p1', incarnation: 7, popup: null, outputGeneration: 38 });
+  assert.deepEqual(r.popups[2], { ptyId: 'p1', incarnation: 7, popup: null, outputGeneration: 38 }, 'a reading with no popup says so');
   assert.deepEqual(r.writes, [], 'THE STARTUP READING TYPES NOTHING: no text, no Enter, no Esc, no digit');
 }
 test('t8 the Codex startup reading reports the popup, then its absence, and types nothing', () => t8(O));
@@ -394,8 +441,8 @@ test('index.ts feeds the watch from both readings and reads it for liveness and 
   const src = readSource(INDEX);
   for (const needle of [
     "onStartupPopup: (r) => noteCodexPopup(r.ptyId, r.incarnation, r.popup, 'startup'),",
-    'const popup = r.ok ? null : popupInReason(r.reason);',
-    "if (r.ok || popup !== null) noteCodexPopup(r.ptyId, r.incarnation, popup, 'gate');",
+    'const popup = gatePopupReading(r.ok, r.ok ? null : popupInReason(r.reason));',
+    "if (popup !== undefined) noteCodexPopup(r.ptyId, r.incarnation, popup, 'gate');",
     'codexPopups: () => codexPopups.popups(Date.now(), popupLive)',
     '...(ptyId && pf && codexPopups.current(agentId, Date.now(), popupLive) ? { screenPopup: true } : {})',
     'try { codexPopups.forget(agentId); } catch { /* best-effort */ }'
@@ -419,7 +466,7 @@ test('nothing on this path can type: the watch and its feeder have no way to wri
 // ---------------------------------------------------------------- mutants
 const MUTANTS = [
   { name: 'M1 no settle time', file: WATCH, from: 'if (s && now - s.since >= CODEX_POPUP_SETTLE_MS) out.push(s);', to: 'if (s) out.push(s);', killers: { t1 } },
-  { name: 'M2 a re-read restarts the popup', file: WATCH, from: 'if (prev && prev.incarnation === incarnation && prev.text === text) {', to: 'if (false) {', killers: { t1 } },
+  { name: 'M2 a re-read restarts the popup', file: WATCH, from: 'if (prev && prev.incarnation === incarnation && samePopup(prev.text, text)) {', to: 'if (false) {', killers: { t1 } },
   { name: 'M3 a reading without it does not end it', file: WATCH, from: '      this.end(prev, source, now);', to: '', killers: { t2 } },
   { name: 'M4 a later hook does not end it', file: WATCH, from: "if (hookAt > s.seenAt) { this.end(s, 'hook', now); return null; }", to: '', killers: { t3 } },
   { name: 'M5 another incarnation does not end it', file: WATCH, from: "if (inc === undefined || (s.incarnation !== null && inc !== s.incarnation)) { this.end(s, 'incarnation', now); return null; }", to: '', killers: { t3 } },
@@ -432,14 +479,55 @@ const MUTANTS = [
   { name: 'M12 an urgent item drags the rest out early', file: DIGEST, from: 'const urgent = fresh.filter((i) => i.urgent === true);', to: 'const urgent = fresh.some((i) => i.urgent === true) ? fresh : [];', killers: { t6 } },
   { name: 'M13 liveness ignores the popup', file: LIVE, from: "if (facts.screenPopup === true) return verdict('UNKNOWN', 'screen-popup', inc);", to: '', killers: { t7 } },
   { name: 'M14 the startup reading never names the popup', file: OWNER, from: 'popup: popup ? codexPopupText(popup) : null,', to: 'popup: null,', killers: { t8 } },
-  { name: 'M15 the startup reading reports a popup forever', file: OWNER, from: 'const popup = codexPopup(r.facts);\n', to: 'const popup = codexPopup(r.facts);\n        if (!popup) return false;\n', killers: { t8 } }
+  { name: 'M15 the startup reading reports a popup forever', file: OWNER, from: 'const popup = codexPopup(r.facts);\n', to: 'const popup = codexPopup(r.facts);\n        if (!popup) return false;\n', killers: { t8 } },
+  { name: 'M16 the title alone is another popup', file: WATCH, from: 'samePopup(prev.text, text)) {', to: 'prev.text === text) {', killers: { t9 } },
+  { name: 'M17 the same popup keeps its oldest text', file: WATCH, from: '      prev.text = text;\n', to: '', killers: { t9 } },
+  { name: 'M18 a cut title matches nothing', file: WATCH, from: '  return (x.cut && x.title.length > 0 && y.title.startsWith(x.title)) || (y.cut && y.title.length > 0 && x.title.startsWith(y.title));', to: '  return false;', killers: { t9 } },
+  { name: 'M19 an admission does not end the popup', file: WATCH, from: '  if (ok) return null;', to: '  if (ok) return undefined;', killers: { t10 } },
+  { name: 'M20 any refusal ends the popup', file: WATCH, from: '  return popupInRefusal ?? undefined;', to: '  return popupInRefusal;', killers: { t10 } }
 ];
 
+/** Jim SHOULD C: the assert each mutant must die at, by its message. A compile error, a TypeError
+ *  or an earlier assert is not a kill. */
+const DIES = {
+  M1: { t1: /^not a decision before it has stayed up(\n|$)/ },
+  M2: { t1: /^a re-read is the same popup(\n|$)/ },
+  M3: { t2: /^the end is a row saying how long it was up(\n|$)/ },
+  M4: { t3: /^a hook after the reading: Codex is running a session(\n|$)/ },
+  M5: { t3: /^another incarnation: that screen is gone(\n|$)/ },
+  M6: { t4: /^forget drops the popup(\n|$)/ },
+  M7: { t5: /^the popup item is urgent(\n|$)/, t6: /^ONLY the popup wakes god inside the window(\n|$)/ },
+  M8: { t5: /^the id carries the popup's start(\n|$)/ },
+  M9: { t5: /^one item for Dwight, not three(\n|$)/ },
+  M10: { t5: /^the refused settle alone is replaced too(\n|$)/ },
+  M11: { t6: /^ONLY the popup wakes god inside the window(\n|$)/ },
+  M12: { t6: /^ONLY the popup wakes god inside the window(\n|$)/ },
+  M13: { t7: /^not routable as idle(\n|$)/ },
+  M14: { t8: /^THE STARTUP READING NAMES THE POPUP(\n|$)/ },
+  M15: { t8: /^a reading with no popup says so(\n|$)/ },
+  M16: { t9: /^the title alone is the same popup(\n|$)/ },
+  M17: { t9: /^the same start and the newest text(\n|$)/ },
+  M18: { t9: /^a cut title matches the title it starts(\n|$)/ },
+  M19: { t10: /^THE RETRIED WAKE IS ADMITTED: the popup is over(\n|$)/ },
+  M20: { t10: /^a refusal for another reason says nothing(\n|$)/ }
+};
+
+test('every mutant names the assert each of its killers must die at', () => {
+  assert.deepEqual(MUTANTS.map((m) => m.name.split(' ')[0]), Object.keys(DIES));
+  for (const m of MUTANTS) assert.deepEqual(Object.keys(DIES[m.name.split(' ')[0]]), Object.keys(m.killers), m.name);
+});
+
 for (const m of MUTANTS) {
-  test(`mutant ${m.name} is killed by ${Object.keys(m.killers).join(', ')}`, async () => {
+  test(`mutant ${m.name} is killed by ${Object.keys(m.killers).join(', ')}`, async (t) => {
     const mod = mutant(m.file, m.from, m.to);
     for (const [name, killer] of Object.entries(m.killers)) {
-      await assert.rejects(async () => killer(mod), `${name} must go red under ${m.name}`);
+      const dies = DIES[m.name.split(' ')[0]][name];
+      await assert.rejects(async () => killer(mod), (e) => {
+        assert.equal(e && e.code, 'ERR_ASSERTION', `${name} under ${m.name} must die at an assert, got: ${e && e.stack}`);
+        assert.match(e.message, dies, `${name} under ${m.name} died at another assert`);
+        t.diagnostic(`${m.name.split(' ')[0]} dies in ${name} at: ${e.message.split('\n')[0]}`);
+        return true;
+      });
     }
   });
 }
