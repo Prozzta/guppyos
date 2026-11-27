@@ -209,7 +209,7 @@ import { HeldInterferenceWatch, HELD_TICK_MS, heldWakesOf } from './heldInterfer
 import { findSilentTurns, type SilentTurnFacts } from './silentTurn';
 import { QuietRefusalWatch } from './quietRefusalWatch';
 import { RefusedSettleWatch } from './refusedSettleWatch';
-import { CodexPopupWatch, CODEX_POPUP_SETTLE_MS, type CodexPopupSource } from './codexPopupWatch';
+import { CodexPopupWatch, CODEX_POPUP_SETTLE_MS, gatePopupReading, type CodexPopupSource } from './codexPopupWatch';
 import { popupInReason } from '../shared/codexScreen';
 import type { SilentTurnView } from '../shared/agentBadges';
 import { CodexRolloutLifecycleSource, threadSettingsAppliedSince } from './codexRolloutLifecycle';
@@ -1103,8 +1103,8 @@ function noteScreenGuard(r: ScreenGuardRecord): void {
   } catch { /* diagnostics never decide */ }
   // WAKE-CODEX-MODAL-PROMPT-BLOCKS-108: the gate read a popup, or admitted (so none is up). Any
   // other refusal says nothing about a popup and changes nothing.
-  const popup = r.ok ? null : popupInReason(r.reason);
-  if (r.ok || popup !== null) noteCodexPopup(r.ptyId, r.incarnation, popup, 'gate');
+  const popup = gatePopupReading(r.ok, r.ok ? null : popupInReason(r.reason));
+  if (popup !== undefined) noteCodexPopup(r.ptyId, r.incarnation, popup, 'gate');
 }
 const automaticSubmit = new AutomaticSubmitOwner(buildOwnerDeps({
   pty: ptyManager,

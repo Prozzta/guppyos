@@ -41,6 +41,37 @@ export interface CodexPopupLive {
   lastHookAt: (agentId: string) => number;
 }
 
+/**
+ * What one screen-gate record says about a popup. An admission is a screen read with no popup on
+ * it (null: it ends a sighting). A refusal that names a popup is that popup. A refusal for any
+ * other reason says nothing either way (undefined: the sighting stays as it is).
+ */
+export function gatePopupReading(ok: boolean, popupInRefusal: string | null): string | null | undefined {
+  if (ok) return null;
+  return popupInRefusal ?? undefined;
+}
+
+/** The title part of a popup text (`<title> — <question>`, cut with `…` when long). */
+function popupTitle(text: string): { title: string; cut: boolean } {
+  const at = text.indexOf(' — ');
+  if (at >= 0) return { title: text.slice(0, at), cut: false };
+  if (!text.endsWith('…')) return { title: text, cut: false };
+  return { title: text.slice(0, -1).replace(/\s*—?\s*$/, ''), cut: true };
+}
+
+/**
+ * The same popup read twice can word itself two ways: the question row under the title is read
+ * only when the tail holds it, so a shorter tail gives the title alone. One popup is one title
+ * (a cut title matches the title it is the start of).
+ */
+export function samePopup(a: string, b: string): boolean {
+  if (a === b) return true;
+  const x = popupTitle(a);
+  const y = popupTitle(b);
+  if (x.title === y.title) return true;
+  return (x.cut && x.title.length > 0 && y.title.startsWith(x.title)) || (y.cut && y.title.length > 0 && x.title.startsWith(y.title));
+}
+
 export class CodexPopupWatch {
   private readonly byAgent = new Map<string, CodexPopupSighting>();
 
@@ -48,7 +79,8 @@ export class CodexPopupWatch {
 
   /**
    * One reading. `text` = the popup on screen, or null = the reading saw none. Returns 'raised' for
-   * a new popup (another text or incarnation is a new one), 'cleared' when one ended, else null.
+   * a new popup (another title or incarnation is a new one), 'cleared' when one ended, else null.
+   * The same popup worded differently keeps its start and takes the newest text.
    */
   note(agentId: string, incarnation: number | null, text: string | null, source: CodexPopupSource, now: number): 'raised' | 'cleared' | null {
     if (!agentId) return null;
@@ -58,7 +90,8 @@ export class CodexPopupWatch {
       this.end(prev, source, now);
       return 'cleared';
     }
-    if (prev && prev.incarnation === incarnation && prev.text === text) {
+    if (prev && prev.incarnation === incarnation && samePopup(prev.text, text)) {
+      prev.text = text;
       prev.seenAt = now;
       return null;
     }
