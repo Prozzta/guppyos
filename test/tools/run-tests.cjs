@@ -509,7 +509,7 @@ function fileJobVerdict({ job, joinFile, strict, readFile, removeFile, log, err 
  * per-file backstop (startBackstop, every platform; never node's --test-timeout), the normal reporter on stdout and the file-timeout reporter (which also
  * records the run's summary counts) on `eventsFile`. Timed-out files are named on stderr.
  */
-function runNodeTest({ rel, extraArgs = [], label, spawn, cwd, timeoutMs, isTTY, env, eventsFile, readFile, removeFile, watchdog, backstop = null, jobExe = null, err, keepRecords = copyRecords, now = Date.now }) {
+function runNodeTest({ rel, extraArgs = [], label, spawn, cwd, timeoutMs, isTTY, env, eventsFile, readFile, removeFile, watchdog, backstop = null, jobExe = null, err, keepRecords = copyRecords, now = Date.now, saveEvents = savePsEvents }) {
   // The watchdog, the backstop and node --test each write their own record file (node truncates its destination).
   const watchFile = `${eventsFile}.watchdog`;
   const backstopFile = `${eventsFile}.backstop`;
@@ -531,6 +531,7 @@ function runNodeTest({ rel, extraArgs = [], label, spawn, cwd, timeoutMs, isTTY,
     ...rel
   ];
   let res;
+  const legStartMs = now();
   try { res = spawn(args, { cwd, stdio: 'inherit', env: runEnv }); } finally { dog.stop(); if (stop) stop(); }
   const endedMs = now();
   const events = readFile(eventsFile);
@@ -555,9 +556,27 @@ function runNodeTest({ rel, extraArgs = [], label, spawn, cwd, timeoutMs, isTTY,
   // COPY them aside before the cleanup below (which is unchanged), so it can be matched afterwards.
   const keptDir = path.join(path.dirname(eventsFile), `kept-${path.basename(eventsFile)}`);
   let kept = null;
+  // FLAKE-OWN-PROCS-POWERSHELL-EXIT-NEG1-EMPTY-108 (gap C): on a RED leg (a failed or timed-out file) the two
+  // journals are kept too: they are the only record of who stopped or killed what, and the cleanup removes them.
+  const red = failures.length > 0 || hung.length > 0;
   if (lost.length) {
     const records = [eventsFile, watchFile, ...(backstop ? [backstopFile, startsFile, `${startsFile}.kills`, `${startsFile}.stops`] : [])];
     try { kept = keepRecords(keptDir, records); } catch (e) { err(`[test-runner] ${label}could not keep the records in ${keptDir}: ${String(e)}`); }
+  } else if (red && backstop) {
+    try { kept = keepRecords(keptDir, [`${startsFile}.kills`, `${startsFile}.stops`]); } catch (e) { err(`[test-runner] ${label}could not keep the journals in ${keptDir}: ${String(e)}`); }
+    if (kept && !kept.length) kept = null; // a red leg with no journal: nothing to say
+  }
+  // Gap D: a failed own-procs PowerShell lookup left a marker row naming its test file. When that file is red,
+  // save the Windows PowerShell engine start (400) and stop (403) events of the leg window now: the log ages
+  // out in about two days. Evidence only: a save that fails is said and changes nothing else.
+  const redFile = (f) => [...failures, ...hung, ...lost].some((x) => path.resolve(String(x.file || '')) === path.resolve(String(f || '')));
+  const psFails = backstop ? psFailRows(readFile(`${startsFile}.stops`)).filter((r) => redFile(r.file)) : [];
+  if (psFails.length) {
+    for (const r of psFails) err(`[test-runner] ${label}a failed own-procs PowerShell lookup (child pid ${r.psFailed}, ${isoMs(r.startedMs)} to ${isoMs(r.endedMs)}, status ${r.status}) is on a red file: ${r.file}`);
+    try {
+      const saved = saveEvents(keptDir, legStartMs, endedMs);
+      if (saved) err(`[test-runner] ${label}PowerShell engine events 400/403 for the leg window ${isoMs(legStartMs)} to ${isoMs(endedMs)} saved in ${saved} (never removed by the runner; delete it once read)`);
+    } catch (e) { err(`[test-runner] ${label}could not save the PowerShell engine events in ${keptDir}: ${String(e).slice(0, 600)}`); }
   }
   removeFile(eventsFile);
   removeFile(watchFile);
@@ -626,6 +645,35 @@ function copyRecords(dir, files) {
     copied.push(f);
   }
   return copied;
+}
+
+/** FLAKE-OWN-PROCS-POWERSHELL-EXIT-NEG1-EMPTY-108 (gap D): own-procs' marker rows in <starts>.stops (notePsFailure). */
+function psFailRows(stopsText) {
+  return String(stopsText || '').split(/\r?\n/).map((l) => { try { return JSON.parse(l); } catch { return null; } })
+    .filter((r) => r && typeof r === 'object' && Number.isInteger(r.psFailed) && typeof r.file === 'string');
+}
+
+/** The script of savePsEvents: the 400 and 403 rows of the Windows PowerShell log between two epoch-ms times, as a JSON array. */
+function psEventsScript(fromMs, toMs) {
+  return `$from = [DateTimeOffset]::FromUnixTimeMilliseconds(${Math.floor(fromMs)}).LocalDateTime
+$to = [DateTimeOffset]::FromUnixTimeMilliseconds(${Math.ceil(toMs)}).LocalDateTime
+$ev = @(Get-WinEvent -FilterHashtable @{ LogName = 'Windows PowerShell'; Id = 400, 403; StartTime = $from; EndTime = $to } -ErrorAction SilentlyContinue)
+$rows = @($ev | ForEach-Object { [pscustomobject]@{ t = $_.TimeCreated.ToUniversalTime().ToString('o'); id = $_.Id; record = $_.RecordId; message = $_.Message } })
+if ($rows.Count -eq 0) { '[]' } else { ConvertTo-Json -InputObject $rows -Compress }`;
+}
+
+/**
+ * Gap D: write the Windows PowerShell engine start/stop events of [fromMs - 5 s, toMs + 5 s] to
+ * <dir>/ps-events-400-403.json and return that path (null off win32). Through own-procs' runPowershell (psEnv,
+ * 60 s cap, no retry); it throws when the query fails. `run` and `write` are for tests.
+ */
+function savePsEvents(dir, fromMs, toMs, { platform = process.platform, run = (s) => require('./own-procs.cjs').runPowershell(s), write = (d, f, text) => { fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(f, text); } } = {}) {
+  if (platform !== 'win32') return null;
+  const out = String(run(psEventsScript(fromMs - 5000, toMs + 5000)));
+  JSON.parse(out); // a reply that is not JSON is a failed save, said by the caller
+  const file = path.join(dir, 'ps-events-400-403.json');
+  write(dir, file, out);
+  return file;
 }
 
 /**
@@ -745,7 +793,7 @@ function totals(code, counts, laneState, log, failures = [], {
   return code;
 }
 
-module.exports = { startBackstop, BACKSTOP_PRELOAD, runNodeTest, endedWithoutExit, fileTimeLines, totals, prepareFileJob, pruneFileJobs, FILE_JOB_DIR, FILE_JOB_PRELOAD, fileJobStrict, jobJoinFailures, fileJobVerdict, prepareTempJail, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, cappedCores, selfJobRate, HEAVYJOB_HELPER, CPU_RATE_50_PERCENT, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, renderLaneFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
+module.exports = { psFailRows, psEventsScript, savePsEvents, startBackstop, BACKSTOP_PRELOAD, runNodeTest,endedWithoutExit, fileTimeLines, totals, prepareFileJob, pruneFileJobs, FILE_JOB_DIR, FILE_JOB_PRELOAD, fileJobStrict, jobJoinFailures, fileJobVerdict, prepareTempJail, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, cappedCores, selfJobRate, HEAVYJOB_HELPER, CPU_RATE_50_PERCENT, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, renderLaneFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
 
 if (require.main === module) {
   const repoRoot = path.resolve(__dirname, '..', '..');
