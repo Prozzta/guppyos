@@ -101,12 +101,12 @@ class FakeAgent {
       try {
         fs.writeFileSync(tmp, body);
         fs.renameSync(tmp, this.composerFile);
-        if (tries > 1) this.rec('composer-write-retried', { tries, seq: this.echoSeq });
+        if (tries > 1) this.rec('composer-write-retried', { tries, seq: this.echoSeq, ms: Date.now() - (giveUpAt - COMPOSER_WRITE_GIVE_UP_MS) });
         return;
       } catch (e) {
         const code = e && e.code;
         if (!COMPOSER_WRITE_RETRY.has(code) || Date.now() >= giveUpAt) {
-          this.rec('composer-write-failed', { code, tries, seq: this.echoSeq, error: String(e) });
+          this.rec('composer-write-failed', { code, tries, seq: this.echoSeq, ms: Date.now() - (giveUpAt - COMPOSER_WRITE_GIVE_UP_MS), error: String(e) });
           return;
         }
         if (tries === 1) this.rec('composer-write-blocked', { code, seq: this.echoSeq });
@@ -165,6 +165,7 @@ class FakeAgent {
     const gapFor = (enter) => (this.scenario.echoGapFrom === 'enter' && !enter ? 0 : Number(this.scenario.echoGapMs) || 0);
     this.gapFor = gapFor;
     let lagged = 0; let lastDue = 0;
+    this.traceEcho = (Number(this.scenario.echoLagMs) || 0) > 0 || (Number(this.scenario.echoLagAfterMs) || 0) > 0;
     process.stdin.on('data', (d) => {
       const enter = carriesEnter(d);
       const keyed = this.scenario.echoLagFrom === 'enter' || this.scenario.echoGapFrom === 'enter';
@@ -176,6 +177,10 @@ class FakeAgent {
       const due = Math.max(Date.now() + (lag > 0 && lagged < limit ? lag : after), lastDue);
       if (lag > 0 && lagged < limit) lagged += 1;
       lastDue = due;
+      // FLAKE-ISO-ECHO-LAG-176-COMMIT-NOT-VISIBLE-ELECTRON-108: in a lag scenario, when each chunk
+      // ARRIVED and when it is due. 'pty-input' is stamped at processing time (after the lag), so
+      // without this a late PTY delivery and a stalled stub read the same in a red's timeline.
+      if (this.traceEcho) this.rec('input-arrived', { bytes: d.length, dueIn: due - Date.now() });
       const how = { gap: gapFor(enter) };
       if (due <= Date.now()) this.onInput(d, how); else setTimeout(() => this.onInput(d, how), due - Date.now());
     });
@@ -284,7 +289,7 @@ class FakeAgent {
     } else {
       const behind = !!this.held;   // a held frame is still out: out() queues this echo behind it
       this.out(echo);
-      if (keyed && !behind) this.rec('echo-written', { seq: this.echoSeq });
+      if ((keyed || this.traceEcho) && !behind) this.rec('echo-written', { seq: this.echoSeq });
     }
   }
 
