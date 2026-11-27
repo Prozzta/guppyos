@@ -217,7 +217,7 @@ test('(gap D) a failed lookup that had a child leaves one marker row in the stop
     const got = markers(stops);
     assert.equal(got.length, 1, 'ONE MARKER ROW');
     const { t, startedMs, endedMs, ...rest } = got[0];
-    assert.deepEqual(rest, { psFailed: 4321, status: 4294967295, file: 'me.test.cjs', by: process.pid });
+    assert.deepEqual(rest, { psFailed: 4321, status: 4294967295, file: 'me.test.cjs', by: process.pid }, 'THE MARKER ROW HAS THESE FIELDS ONLY (no pid: it is not a stop row)');
     assert.ok(before <= startedMs && startedMs <= endedMs && endedMs <= t && t <= after, 'it carries the wall times of the call');
     assert.equal('pid' in got[0], false, 'no pid field: it is not a stop row');
     assert.deepEqual(runner.psFailRows(fs.readFileSync(stops, 'utf8')).map((r) => r.psFailed), [4321], 'the runner reads it back');
