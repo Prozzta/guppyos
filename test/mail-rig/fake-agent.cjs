@@ -180,8 +180,10 @@ class FakeAgent {
       // FLAKE-ISO-ECHO-LAG-176-COMMIT-NOT-VISIBLE-ELECTRON-108: in a lag scenario, when each chunk
       // ARRIVED and when it is due. 'pty-input' is stamped at processing time (after the lag), so
       // without this a late PTY delivery and a stalled stub read the same in a red's timeline.
-      if (this.traceEcho) this.rec('input-arrived', { bytes: d.length, dueIn: due - Date.now() });
+      // ISO-ECHO-DIAG-TIMING-NEUTRAL-108: kept in memory and carried on the chunk into its
+      // pty-input row. No write here: a sync append per chunk on the input path is an observer cost.
       const how = { gap: gapFor(enter) };
+      if (this.traceEcho) { how.arrivedAt = now(); how.dueIn = due - how.arrivedAt; }
       if (due <= Date.now()) this.onInput(d, how); else setTimeout(() => this.onInput(d, how), due - Date.now());
     });
     process.stdin.resume();
@@ -240,7 +242,11 @@ class FakeAgent {
 
   // `how.gap` is this chunk's echo gap, decided by the stdin handler when the chunk arrived.
   onInput(d, how) {
-    this.rec('pty-input', { data: d });
+    // ISO-ECHO-DIAG-TIMING-NEUTRAL-108: in a lag scenario this row also carries the chunk's arrival
+    // and the echo it makes. That echo goes out later in this same synchronous call (unless held),
+    // so this row's t marks it too, and no echo-written row is added for it.
+    this.rec('pty-input', how && how.arrivedAt !== undefined
+      ? { data: d, arrivedAt: how.arrivedAt, dueIn: how.dueIn, echo: this.hung ? null : this.echoSeq + 1 } : { data: d });
     if (this.hung) return;
     // RIG-176-LOAD-FLAKE (1.1.91): with echoGapMs, EVERYTHING this input makes the stub print
     // (the Enter's \r\n, a turn's output) goes out in ONE write with its echo, and later output
@@ -289,7 +295,7 @@ class FakeAgent {
     } else {
       const behind = !!this.held;   // a held frame is still out: out() queues this echo behind it
       this.out(echo);
-      if ((keyed || this.traceEcho) && !behind) this.rec('echo-written', { seq: this.echoSeq });
+      if (keyed && !behind) this.rec('echo-written', { seq: this.echoSeq });
     }
   }
 
