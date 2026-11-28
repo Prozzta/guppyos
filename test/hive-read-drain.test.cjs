@@ -193,6 +193,36 @@ test('an authority read is one of the reads: the wait covers it, and after dispo
   assert.equal(g.calls, before, 'an authority read asked for after dispose() opened the file');
 });
 
+test('the authority stat is counted too: shutdown waits for it before the hive folder can be removed', async (t) => {
+  const w = await world(t);
+  const tasks = path.join(w.hive.root(), 'tasks.json');
+  const real = fs.promises.stat;
+  const g = { open: 0, gated: true, release: () => {}, entered: () => {} };
+  fs.promises.stat = async function gatedAuthorityStat(p, ...rest) {
+    if (path.resolve(String(p)) !== path.resolve(tasks)) return real.call(fs.promises, p, ...rest);
+    g.open++; g.entered();
+    try {
+      if (g.gated) await new Promise((go) => { g.release = go; });
+      return await real.call(fs.promises, p, ...rest);
+    } finally { g.open--; }
+  };
+  t.after(() => { g.gated = false; g.release(); fs.promises.stat = real; });
+
+  const reading = w.hive.loadAuthorityAsync(tasks, true, null);
+  await started(g, () => g.open === 1, reading);
+  w.hive.dispose();
+  let waited = false;
+  const wait = w.hive.drainReads().then(() => { waited = true; });
+  for (let i = 0; i < 20; i++) await turn();
+  const openWhenWaitEnded = waited ? g.open : null;
+  g.gated = false;
+  g.release();
+  await Promise.all([wait, reading]);
+  assert.equal(openWhenWaitEnded, null,
+    'the wait ended with an authority stat still open: the delete would run under it');
+  assert.equal(g.open, 0, 'the authority stat is closed before the wait ends');
+});
+
 test('the outbox dedup load passes HiveDisposedError on from both of its reads', () => {
   const src = codeOnly(readSource('src/main/hive.ts'), 'hive.ts');
   const from = src.indexOf('private async outboxDedupEntries(');
