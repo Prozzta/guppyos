@@ -2882,6 +2882,10 @@ export const SINGLE_FILE_LIGHT_MAX = 1;
  *  stays light; a loop over the suite turns its later files into leases, so the slot, not only the hook
  *  layer's deny, stops a whole-suite loop. A count, not a runtime: a light run never says it ended. */
 export const HEAVY_CALL_LIGHT_MAX = 10;
+/** HEAVY-LOCK-ADMITTED-BENCH-WHILE-HELD-108 (F-B; the Human, 2026-11-28): while ANOTHER agent holds the
+ *  machine, one call runs this many test processes light; the next waits its turn in the queue. A script
+ *  of four single-file runs (node and Electron legs) ran light beside a held suite on 2026-11-25. */
+export const HEAVY_CALL_LIGHT_MAX_HELD = 1;
 /** One named test file: a script path, not a directory or a glob node expands (both are suites). */
 const ONE_TEST_FILE = (f: string): boolean => /\.[cm]?[jt]sx?$/i.test(f) && !/[*?[\]{}]/.test(f);
 
@@ -3747,14 +3751,21 @@ export class HeavyJobLock {
 
   /** HEAVY-LOOP-LIGHT-CAP: may this call run one more test process light? */
   private lightLeft(agentId: string, callId: string): boolean {
-    return (this.callLight.get(`${agentId}\0${callId}`) ?? 0) < HEAVY_CALL_LIGHT_MAX;
+    return (this.callLight.get(`${agentId}\0${callId}`) ?? 0) < this.lightMax(agentId);
+  }
+
+  /** HEAVY-LOCK-ADMITTED-BENCH-WHILE-HELD-108: the cap reads the holders when the process asks. Only
+   *  ANOTHER agent's slot lowers it; nobody holding, or the agent alone, keeps HEAVY_CALL_LIGHT_MAX. */
+  private lightMax(agentId: string): number {
+    for (const h of this.holders.keys()) if (h !== agentId) return HEAVY_CALL_LIGHT_MAX_HELD;
+    return HEAVY_CALL_LIGHT_MAX;
   }
 
   private spendLight(agentId: string, callId: string): void {
     const k = `${agentId}\0${callId}`;
     const n = (this.callLight.get(k) ?? 0) + 1;
     this.callLight.set(k, n);
-    if (n === HEAVY_CALL_LIGHT_MAX) this.log({ kind: 'heavy-lock', action: 'call-light-spent', agentId, callId, light: n });
+    if (n === this.lightMax(agentId)) this.log({ kind: 'heavy-lock', action: 'call-light-spent', agentId, callId, light: n });
   }
 
   /** PostToolUse: the call's window closes (a test process may still report for HEAVY_CALL_SLACK_MS). */

@@ -73,30 +73,41 @@ const ANDY = [
   'cd x && for i in 1 2 3; do timeout -k 5 22 C:/n/node.exe --test --test-reporter=tap test/config-integrity.test.cjs > /tmp/np$i.txt 2>&1; done'
 ];
 
+// HEAVY-LOCK-ADMITTED-BENCH-WHILE-HELD-108 (F-B; the Human, 2026-11-28): while ANOTHER agent holds, one
+// call runs ONE single file light and its next run waits its turn (heavy-held-one-run-108). So the first
+// run of each shape is light beside the holder and the second waits; the later runs of a loop (the call's
+// match consumed by the first process) are bound with nobody else holding, where all three stay light.
 K.singleLight = async (M = HJ) => {
   for (const [n, cmd] of ANDY.entries()) {
     const x = rig(M);
     x.l.acquire('b', H, 'npm test', 'hb', false);
     x.l.noteCall('a', 'c1', cmd);
-    for (let i = 0; i < 3; i++) {
-      const pid = 100 + i;
-      const a = await ask(x, 'a', pid, { files: ['test/config-integrity.test.cjs'] });
-      assert.equal(a.state, 'light', `A SINGLE FILE PASSES WHILE ANOTHER AGENT HOLDS THE SLOT (shape ${n}, run ${i + 1})`);
-      x.tick(20_000);   // one file after the other, through the call
-    }
+    const a = await ask(x, 'a', 100, { files: ['test/config-integrity.test.cjs'] });
+    assert.equal(a.state, 'light', `A SINGLE FILE PASSES WHILE ANOTHER AGENT HOLDS THE SLOT (shape ${n}, run 1)`);
     assert.equal(x.l.queueSnapshot().waiters.length, 0, 'nobody queued');
     assert.equal(x.logs.filter((r) => r.action === 'deny').length, 0, 'no deny row');
+    x.tick(20_000);
+    assert.equal((await ask(x, 'a', 101, { files: ['test/config-integrity.test.cjs'] })).state, 'wait', `F-B: the call's second run waits its turn while another agent holds (shape ${n})`);
+    const y = rig(M);
+    y.l.noteCall('a', 'c1', cmd);
+    for (let i = 0; i < 3; i++) {
+      const b = await ask(y, 'a', 110 + i, { files: ['test/config-integrity.test.cjs'] });
+      assert.equal(b.state, 'light', `A SINGLE FILE PASSES, RUN AFTER RUN THROUGH THE CALL (shape ${n}, run ${i + 1}; nobody else holds)`);
+      y.tick(20_000);   // one file after the other, through the call
+    }
   }
 };
-test('a single-file node --test passes while another agent holds the slot (Andy\'s call shapes: node by variable or path, $(...), a file run in a loop)', () => K.singleLight());
+test('a single-file node --test passes while another agent holds the slot, one run per call (Andy\'s call shapes: node by variable or path, $(...), a file run in a loop)', () => K.singleLight());
 
 K.fanOut = async (M = HJ) => {
+  // HEAVY-LOCK-ADMITTED-BENCH-WHILE-HELD-108: nobody else holds here. Beside a holder the call's one light
+  // run would already be spent, so the second file would wait with or without the fan-out cap; with nobody
+  // holding, only the fan-out cap stops it from running light, and it takes the slot instead.
   const x = rig(M);
-  x.l.acquire('b', H, 'npm test', 'hb', false);
   x.l.noteCall('a', 'c1', 'for f in a b c; do $N --test test/$f.test.cjs & done; wait');
   assert.equal((await ask(x, 'a', 201, { files: ['test/a.test.cjs'] })).state, 'light');
   x.alive.add(201);
-  assert.equal((await ask(x, 'a', 202, { files: ['test/b.test.cjs'] })).state, 'wait', 'A SECOND SINGLE FILE AT ONCE IS A FAN-OUT: IT WAITS');
+  assert.equal((await ask(x, 'a', 202, { files: ['test/b.test.cjs'] })).state, 'held', 'A SECOND SINGLE FILE AT ONCE IS A FAN-OUT: IT TAKES THE SLOT');
   x.alive.delete(201);
   assert.equal((await ask(x, 'a', 203, { files: ['test/c.test.cjs'] })).state, 'light', 'once the first ends, the next single file is light');
   // the cap is per agent: another agent's live single file does not count
@@ -104,7 +115,7 @@ K.fanOut = async (M = HJ) => {
   x.alive.add(203);
   assert.equal((await ask(x, 'c', 204, { files: ['test/a.test.cjs'] })).state, 'light', 'the cap is per agent');
 };
-test('a parallel fan-out of single files: the first is light, the rest wait while it runs', () => K.fanOut());
+test('a parallel fan-out of single files: the first is light, the rest take the slot while it runs (nobody else holds)', () => K.fanOut());
 
 K.suiteWaits = async (M = HJ) => {
   const shapes = [
@@ -159,14 +170,15 @@ K.scriptLight = async (M = HJ) => {
     ['a bash script', 'bash muts.sh', 50],
     ['a node wrapper', 'node gen-mut.cjs m.json r', 51]
   ];
+  // HEAVY-LOCK-ADMITTED-BENCH-WHILE-HELD-108: nobody else holds in these cells (as in K.fanOut), so the
+  // second file is stopped by the fan-out cap alone, not by the held one-run cap.
   for (const [what, cmd, ppid] of cases) {
     const x = rig(M);
-    x.l.acquire('b', H, 'npm test', 'hb', false);
     x.l.noteCall('a', 'c1', cmd);
     const one = await ask(x, 'a', 500, { files: ['test/a.test.cjs'], ppid });
     assert.deepEqual([one.state, one.why], ['light', 'one test file, one at a time'], `A SCRIPT-STARTED SINGLE FILE IS LIGHT: ${what}`);
     x.alive.add(500);
-    assert.equal((await ask(x, 'a', 501, { files: ['test/b.test.cjs'], ppid })).state, 'wait', `A SECOND SCRIPT-STARTED SINGLE FILE AT ONCE IS HEAVY: ${what}`);
+    assert.equal((await ask(x, 'a', 501, { files: ['test/b.test.cjs'], ppid })).state, 'held', `A SECOND SCRIPT-STARTED SINGLE FILE AT ONCE IS HEAVY: ${what}`);
     assert.ok(x.logs.some((r) => r.action === 'lease-single-busy' && r.agentId === 'a'), 'the fan-out is logged');
   }
   // Several files under a script stay heavy, whatever is alive.

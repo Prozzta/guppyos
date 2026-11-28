@@ -11,6 +11,11 @@ require('../tools/own-job.cjs');
  * that ties a process to its call (the call's own run, a loop's run, a shown single file). After that its
  * test processes are leases: they take the slot, or wait for it. A count, not a runtime: a light run
  * never reports its end, so its runtime is not known; a count is exact and costs nothing per lease.
+ *
+ * HEAVY-LOCK-ADMITTED-BENCH-WHILE-HELD-108 (F-B, the Human 2026-11-28): while ANOTHER agent holds the
+ * machine the cap is HEAVY_CALL_LIGHT_MAX_HELD (one run; heavy-held-one-run-108 binds it). The cells
+ * here bind the HEAVY_CALL_LIGHT_MAX cap, so they run with nobody else holding: past the cap a file
+ * takes the free slot. K.single keeps another holder (one run per call is light there too).
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -49,7 +54,6 @@ K.fewLight = async (M = HJ) => {
   assert.ok(MAX >= 8 && MAX <= 32, `the cap is a few files, not one and not the suite (${MAX})`);
   for (const [what, cmd] of [...SUITE_LOOPS, ['a literal loop', 'for f in a b c; do node --test test/$f.test.cjs; done']]) {
     const x = rig(M);
-    x.l.acquire('b', H, 'npm test', 'hb', false);
     x.l.noteCall('a', 'c1', cmd);
     for (let i = 0; i < 3; i++) {
       const a = await ask(x, 'a', 100 + i, { files: [`test/f${i}.test.cjs`] });
@@ -58,35 +62,30 @@ K.fewLight = async (M = HJ) => {
     }
   }
 };
-test('a loop of a few files stays light while another agent holds', () => K.fewLight());
+test('a loop of a few files stays light (nobody else holds)', () => K.fewLight());
 
 K.suiteLease = async (M = HJ) => {
   for (const [what, cmd] of SUITE_LOOPS) {
     const x = rig(M);
-    x.l.acquire('b', H, 'npm test', 'hb', false);
     x.l.noteCall('a', 'c1', cmd);
     for (let i = 0; i < MAX; i++) {
       assert.equal((await ask(x, 'a', 100 + i, { files: [`test/f${i}.test.cjs`] })).state, 'light', `${what}: run ${i + 1} of ${MAX} is light`);
       x.tick(2_000);
     }
     const over = await ask(x, 'a', 200, { files: ['test/over.test.cjs'] });
-    assert.equal(over.state, 'wait', `A WHOLE-SUITE LOOP TAKES THE SLOT: past ${MAX} light runs it waits for the holder (${what})`);
+    assert.equal(over.state, 'held', `A WHOLE-SUITE LOOP TAKES THE SLOT: past ${MAX} light runs its next file is a lease (${what})`);
+    assert.ok(over.leaseId, 'a real lease');
     assert.equal(x.logs.filter((r) => r.action === 'call-light-spent' && r.callId === 'c1' && r.light === MAX).length, 1, 'the spent cap is logged once');
-    x.l.callDone('b', 'hb');
-    const held = await ask(x, 'a', 201, { files: ['test/over.test.cjs'] });
-    assert.equal(held.state, 'held', `A WHOLE-SUITE LOOP TAKES THE SLOT: once free, its next file is a lease (${what})`);
-    assert.ok(held.leaseId, 'a real lease');
     assert.deepEqual(x.l.snapshot().map((s) => s.agentId), ['a']);
   }
 };
-test('a whole-suite loop is turned into a lease: past the cap its files take the slot (loop and shown paths)', () => K.suiteLease());
+test('a whole-suite loop is turned into a lease: past the cap its files take the slot (loop and shown paths; nobody else holds)', () => K.suiteLease());
 
 K.perCall = async (M = HJ) => {
   const x = rig(M);
-  x.l.acquire('b', H, 'npm test', 'hb', false);
   x.l.noteCall('a', 'c1', SUITE_LOOPS[0][1]);
   for (let i = 0; i < MAX; i++) await ask(x, 'a', 100 + i, { files: [`test/f${i}.test.cjs`] });
-  assert.equal((await ask(x, 'a', 150, { files: ['test/x.test.cjs'] })).state, 'wait');
+  assert.equal((await ask(x, 'a', 150, { files: ['test/x.test.cjs'] })).state, 'held', 'past the cap the call takes the slot');
   x.l.noteCallEnd('a', 'c1');
   x.l.noteCall('a', 'c2', 'node --test test/x.test.cjs');
   const a = await ask(x, 'a', 151, { files: ['test/x.test.cjs'] });
@@ -117,7 +116,6 @@ K.together = async (M = HJ) => {
   // The fan-out cap: a parallel loop's processes are alive together, so one runs light.
   {
     const x = rig(M);
-    x.l.acquire('b', H, 'npm test', 'hb', false);
     x.l.noteCall('a', 'c1', 'for f in a b c d; do $N --test test/$f.test.cjs & done; wait');
     const pids = [101, 102, 103, 104]; pids.forEach((p) => x.alive.add(p));
     assert.equal(lightOf(await together(x, 'a', pids)), 1, 'LEASES IN FLIGHT AT ONCE: A PARALLEL FAN-OUT RUNS ONE FILE LIGHT');
@@ -125,7 +123,6 @@ K.together = async (M = HJ) => {
   // The call cap: a parallel loop over the suite (node by name and by variable) runs at most MAX light.
   for (const cmd of ['for f in $(ls test/*.test.cjs); do node --test "$f" & done; wait', 'for f in $(ls test/*.test.cjs); do $N --test "$f" & done; wait']) {
     const x = rig(M);
-    x.l.acquire('b', H, 'npm test', 'hb', false);
     x.l.noteCall('a', 'c1', cmd);
     const pids = Array.from({ length: MAX + 4 }, (_, i) => 300 + i);
     assert.ok(lightOf(await together(x, 'a', pids)) <= MAX, `LEASES IN FLIGHT AT ONCE: A PARALLEL SUITE LOOP RUNS AT MOST ${MAX} LIGHT (${cmd})`);
@@ -133,18 +130,17 @@ K.together = async (M = HJ) => {
   // The call cap on the shown path alone: short-lived processes (the fan-out cap never binds).
   {
     const x = rig(M);
-    x.l.acquire('b', H, 'npm test', 'hb', false);
     x.l.noteCall('a', 'c1', SUITE_LOOPS[1][1]);
     const rs = await together(x, 'a', Array.from({ length: MAX + 4 }, (_, i) => 400 + i));
     assert.equal(lightOf(rs), MAX, `LEASES IN FLIGHT AT ONCE: THE SHOWN PATH RUNS EXACTLY ${MAX} LIGHT`);
   }
 };
-test('leases in flight at once: the fan-out cap and the call cap both hold (Jim M1)', () => K.together());
+test('leases in flight at once: the fan-out cap and the call cap both hold (Jim M1; nobody else holds)', () => K.together());
 
 // ─── MUTANT CENSUS ──────────────────────────────────────────────────────────────────────────
 
 const MUTANTS = [
-  { name: 'no cap', edits: [['    return (this.callLight.get(`${agentId}\\0${callId}`) ?? 0) < HEAVY_CALL_LIGHT_MAX;', '    return true;']], killer: 'suiteLease', dies: /A WHOLE-SUITE LOOP TAKES THE SLOT/ },
+  { name: 'no cap', edits: [['    return (this.callLight.get(`${agentId}\\0${callId}`) ?? 0) < this.lightMax(agentId);', '    return true;']], killer: 'suiteLease', dies: /A WHOLE-SUITE LOOP TAKES THE SLOT/ },
   { name: 'the loop path is not counted', edits: [['    if (!loop(c)) c.used = true;\n    this.spendLight(agentId, c.callId);', '    if (!loop(c)) c.used = true;']], killer: 'suiteLease', dies: /A WHOLE-SUITE LOOP TAKES THE SLOT: .*\(a loop run/ },
   { name: 'the shown path is not counted', edits: [['    this.spendLight(agentId, call.callId);\n', '']], killer: 'suiteLease', dies: /A WHOLE-SUITE LOOP TAKES THE SLOT: .*\(a shown run/ },
   { name: 'the loop path ignores the cap', edits: [['\n      && this.lightLeft(agentId, c.callId));', ');']], killer: 'suiteLease', dies: /A WHOLE-SUITE LOOP TAKES THE SLOT: .*\(a loop run/ },
