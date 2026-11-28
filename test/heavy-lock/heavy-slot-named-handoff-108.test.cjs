@@ -173,6 +173,23 @@ K.namedGuards = async (M = HJ) => {
 };
 test('F3: the named agent gets the whole machine (never beside a running job), and a gone one gets nothing', () => K.namedGuards());
 
+K.namedCaller = async (M = HJ) => {
+  // The holder's hold ends by ttl inside the NAMED agent's own call: that call takes the slot at once,
+  // so a "start your job now" mail and steer would land on an agent whose job is already starting.
+  const x = rig(M);
+  x.l.acquire('jim', H, 'npm test', 'j1', false);
+  x.tick(1_000);
+  assert.deepEqual(await x.l.lease('god', { op: 'next', to: 'creed' }), { state: 'next', to: 'creed', queued: false });
+  x.tick(M.HEAVY_TTL_MS - 500);   // jim's hold is past its ttl; the name (1 s younger) still stands
+  assert.deepEqual(x.l.acquire('creed', H, 'bash bench.sh', 'c1', false), { allow: true, acquired: true }, 'the named caller takes the slot in its own call');
+  assert.equal(x.rows('release').at(-1).reason, 'ttl', 'the slot came free by ttl inside that call');
+  assert.equal(x.rows('reserve').filter((r) => r.named).length, 1, 'the hand-off was made for it');
+  assert.equal(x.rows('acquire').at(-1).reserved, true, 'and its call used it');
+  assert.deepEqual(x.named, [], 'THE CALLER IS NOT TOLD TO START THE JOB IT IS STARTING');
+  assert.equal((await x.status('god')).next, null);
+};
+test('F3: a hand-off made inside the named agent\'s own call is not announced to it', () => K.namedCaller());
+
 K.notice = (M = HJ) => {
   const until = Date.UTC(2026, 10, 25, 7, 54, 33);
   const n = M.heavySlotNamedNotice('creed', until);
@@ -212,6 +229,8 @@ const MUTANTS = [
     killer: 'namedHandOff', dies: /THE HAND-OFF IS LOGGED/ },
   { name: 'the named agent is reserved but not told', edits: [['    try { this.d.notifyNamed?.(to, until); } catch { /* best effort: the reservation stands */ }\n', '']],
     killer: 'namedHandOff', dies: /THE NAMED AGENT IS TOLD HEAVY SLOT FREE/ },
+  { name: 'the named caller is told to start the job it is starting', edits: [['    if (to === this.calling) return;\n', '']],
+    killer: 'namedCaller', dies: /THE CALLER IS NOT TOLD TO START THE JOB IT IS STARTING/ },
   { name: 'the name outlives its hand-off', edits: [['    this.nextUp = null;   // the name is spent\n', '']],
     killer: 'namedHandOff', dies: /THE NAME IS SPENT/ },
   { name: 'a slot free at `heavy next` waits for a release that never comes', edits: [['    if (!queued) this.grant();\n', '']],

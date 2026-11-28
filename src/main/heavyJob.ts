@@ -3251,6 +3251,8 @@ export class HeavyJobLock {
     this.nextUp = null;   // the name is spent
     this.log({ kind: 'heavy-lock', action: 'reserve', agentId: to, heavyKind: 'suite', until: new Date(until).toISOString(), waitedMs: 0, exclusive: true, named: true });
     this.changed();
+    // Not the caller: its own call takes the slot in this same step (as lapse() and grant() spare it).
+    if (to === this.calling) return;
     try { this.d.notifyNamed?.(to, until); } catch { /* best effort: the reservation stands */ }
   }
 
