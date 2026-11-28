@@ -1359,7 +1359,10 @@ export class HiveManager {
       } catch { /* unparseable */ }
       return { ok: false, reason: 'unreadable', sig: await sig() };
     }
-    if (!transient && await this.countedRead(join(inbox, UNDELIVERED_DIR, `${id}.json`), () => fsPromises.stat(join(inbox, UNDELIVERED_DIR, `${id}.json`))).then(() => true, () => false)) return { ok: false, reason: 'set-aside', sig: await sig() };
+    if (!transient && await this.countedRead(join(inbox, UNDELIVERED_DIR, `${id}.json`), () => fsPromises.stat(join(inbox, UNDELIVERED_DIR, `${id}.json`))).then(() => true, (e) => {
+      if (e instanceof HiveDisposedError) throw e;
+      return false;
+    })) return { ok: false, reason: 'set-aside', sig: await sig() };
     return { ok: false, reason: transient ? 'transient' : 'missing', sig: await sig() };
   }
 
@@ -4144,6 +4147,8 @@ export class HiveManager {
       const outbox = join(agentsDir, id, 'outbox');
       try { if ((await fsPromises.stat(outbox)).isDirectory()) want.add(outbox); } catch { /* gone */ }
     }
+    // A reconciliation already in flight outlives stopRouter(); it must not re-arm watchers.
+    if (this.readsRefused) return;
     for (const [dir, w] of this.outboxWatchers) {
       if (want.has(dir)) continue;
       try { w.close(); } catch { /* already closed */ }
