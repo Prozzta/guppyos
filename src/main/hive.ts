@@ -1338,14 +1338,14 @@ export class HiveManager {
   async mailBodyAsync(agentId: string, id: string): Promise<ReturnType<HiveManager['mailBody']>> {
     const inbox = join(this.agentDir(agentId), 'inbox');
     const sig = async (): Promise<string> => (await Promise.all([join(inbox, `${id}.json`), join(inbox, '.done', `${id}.json`)].map(async (p) => {
-      try { const s = await fsPromises.stat(p); return `${s.size}:${s.mtimeMs}`; } catch { return '-'; }
+      try { const s = await this.countedRead(p, () => fsPromises.stat(p)); return `${s.size}:${s.mtimeMs}`; } catch { return '-'; }
     }))).join('|');
     if ((!isValidMailId(id) && !/^[^\\/:*?"<>|]+$/.test(id)) || id.includes('..')) return { ok: false, reason: 'unreadable', sig: 'invalid' };
     let transient = false;
     for (const [path, moved] of [[join(inbox, `${id}.json`), false], [join(inbox, '.done', `${id}.json`), true]] as const) {
       let raw: string;
       try {
-        if ((await fsPromises.stat(path)).size > HiveManager.INBOX_MESSAGE_MAX_BYTES) return { ok: false, reason: 'unreadable', sig: await sig() };
+        if ((await this.countedRead(path, () => fsPromises.stat(path))).size > HiveManager.INBOX_MESSAGE_MAX_BYTES) return { ok: false, reason: 'unreadable', sig: await sig() };
         raw = await this.readTextAsync(path);
       } catch (e) {
         const code = (e as NodeJS.ErrnoException)?.code;
@@ -1359,7 +1359,7 @@ export class HiveManager {
       } catch { /* unparseable */ }
       return { ok: false, reason: 'unreadable', sig: await sig() };
     }
-    if (!transient && await fsPromises.stat(join(inbox, UNDELIVERED_DIR, `${id}.json`)).then(() => true, () => false)) return { ok: false, reason: 'set-aside', sig: await sig() };
+    if (!transient && await this.countedRead(join(inbox, UNDELIVERED_DIR, `${id}.json`), () => fsPromises.stat(join(inbox, UNDELIVERED_DIR, `${id}.json`))).then(() => true, () => false)) return { ok: false, reason: 'set-aside', sig: await sig() };
     return { ok: false, reason: transient ? 'transient' : 'missing', sig: await sig() };
   }
 
@@ -4074,15 +4074,17 @@ export class HiveManager {
     this.routerReconciling = true;
     try {
       const agentsDir = join(root, 'agents');
-      const ids = await fsPromises.readdir(agentsDir);
-      const agents = this.registry().agents;
-      // ROUTER-ASYNC-DELIVER-107: no existence read here: the pass reads each outbox once and
-      // skips one that is missing, so a probe read doubled every idle outbox's reads.
-      for (const id of ids) {
-        if (agents[id]?.archived) continue;
-        this.scheduleRouteOnce(join(agentsDir, id, 'outbox'));
-      }
-      await this.refreshOutboxWatchersAsync(agentsDir, agents);
+      await this.countedRead(agentsDir, async () => {
+        const ids = await fsPromises.readdir(agentsDir);
+        const agents = this.registry().agents;
+        // ROUTER-ASYNC-DELIVER-107: no existence read here: the pass reads each outbox once and
+        // skips one that is missing, so a probe read doubled every idle outbox's reads.
+        for (const id of ids) {
+          if (agents[id]?.archived) continue;
+          this.scheduleRouteOnce(join(agentsDir, id, 'outbox'));
+        }
+        await this.refreshOutboxWatchersAsync(agentsDir, agents);
+      });
     } catch { /* a later bounded pass retries */ }
     finally { this.routerReconciling = false; }
   }
@@ -7201,7 +7203,10 @@ export class HiveManager {
   async logTailAsync(n = 200): Promise<unknown[]> {
     const root = this.root();
     if (!root || n <= 0) return [];
-    const files = await filesInOrderAsync(join(root, 'log.jsonl'));
+    const log = join(root, 'log.jsonl');
+    let files: string[];
+    try { files = await this.countedRead(log, () => filesInOrderAsync(log)); }
+    catch (e) { if (e instanceof HiveDisposedError) return []; throw e; }
     const parse = (l: string): unknown => { try { return JSON.parse(l); } catch { return { raw: l }; } };
     let rows: unknown[] = [];
     for (let i = files.length - 1; i >= 0 && rows.length < n; i--) {
@@ -7455,7 +7460,7 @@ export class HiveManager {
     // intervening write, guard, watcher, or fallback invalidation cannot revive old bytes.
     let generation = this.authorityGeneration.get(p) ?? 0;
     const cached = this.authorityCache.get(p);
-    const st = await fsPromises.stat(p).catch(() => null);
+    const st = await this.countedRead(p, () => fsPromises.stat(p)).catch(() => null);
     if (st && cached && cached.key === statKey(st) && (this.authorityGeneration.get(p) ?? 0) === generation) {
       cached.checkedAt = now;
       return cached.value as T;
@@ -7488,7 +7493,7 @@ export class HiveManager {
       const generation = this.authorityGeneration.get(p) ?? 0;
       const overtaken = (): boolean => (this.authorityGeneration.get(p) ?? 0) !== generation;
       // The key is taken BEFORE the read: a change between the two re-reads at the next revalidate.
-      const st = await fsPromises.stat(p).catch(() => null);
+      const st = await this.countedRead(p, () => fsPromises.stat(p)).catch(() => null);
       if (overtaken()) continue;
       if (!st) { this.invalidateAuthorityCache(p); return null; }
       const key = statKey(st);
@@ -7587,11 +7592,11 @@ export class HiveManager {
     this.authorityFallbackTimer.unref?.();
   }
   private async revalidateAuthoritiesAsync(): Promise<void> {
-    if (this.authorityFallbackRunning || this.authorityTestClock || !this.authorityCache.size) return;
+    if (this.readsRefused || this.authorityFallbackRunning || this.authorityTestClock || !this.authorityCache.size) return;
     this.authorityFallbackRunning = true;
     try {
       await Promise.all([...this.authorityCache].map(async ([file, entry]) => {
-        const st = await fsPromises.stat(file).catch(() => null);
+        const st = await this.countedRead(file, () => fsPromises.stat(file)).catch(() => null);
         if (this.authorityCache.get(file) !== entry) return;
         if (!st) this.invalidateAuthorityCache(file);
         // LAG-SYNC-IO-107: changed or unproven: re-read here, not in the next reader on main.
