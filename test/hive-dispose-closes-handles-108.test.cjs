@@ -61,9 +61,9 @@ const { HiveManager } = loadTs('src/main/hive.ts');
 const openUnder = (dir) => [...open].filter((r) => r.path === dir || r.path.startsWith(dir + path.sep))
   .map((r) => `${r.kind} ${path.relative(dir, r.path) || '.'}`).sort();
 
-async function floor() {
+async function floor(Manager = HiveManager) {
   const home = fs.realpathSync(fs.mkdtempSync(path.join(JAIL, 'floor-')));
-  const hive = new HiveManager(() => home, () => true);
+  const hive = new Manager(() => home, () => true);
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
   await hive.ensureAgent({ id: 'andy-1', name: 'Andy', provider: 'claude', cwd: home });
   hive.send({ to: 'andy-1', act: 'request', subject: 'Review PR 12', body: 'please' }, 'god-1');
@@ -227,6 +227,64 @@ test('dispose() stops the router itself: no outbox watcher is left in the folder
   assert.deepEqual(openUnder(home), [], 'dispose() left a router watcher in the folder');
   deletes(home);
 });
+
+/** A periodic reconciliation can have its agents/ list already open when dispose stops its timer.
+ * It must not install fresh outbox watchers after that stop: drainReads() is the last barrier before
+ * the caller removes the hive folder.  The test drives the real interval callback, not a private call. */
+async function reconcileAfterDisposeLeavesNoWatchers(Manager) {
+  const { home, hive } = await floor(Manager);
+  await shutDown(hive);
+  const ticks = [];
+  let permitWatch = false;
+  const runtime = {
+    setInterval: (fn) => { ticks.push(fn); return fn; },
+    clearInterval: () => {},
+    watch: (dir, fn) => {
+      if (!permitWatch) throw new Error('watching is held until the reconciliation is in flight');
+      return fs.watch(dir, fn);
+    }
+  };
+  const cold = new Manager(() => home, () => true, runtime);
+  const agentsDir = path.resolve(path.join(cold.root(), 'agents'));
+  const real = fs.promises.readdir;
+  const g = gate();
+  fs.promises.readdir = function gatedAgentList(p, ...rest) {
+    if (path.resolve(String(p)) !== agentsDir) return real.call(fs.promises, p, ...rest);
+    return g.through(() => real.call(fs.promises, p, ...rest));
+  };
+  try {
+    cold.startRouter();
+    await cold.routerIdle();
+    assert.equal(ticks.length, 1, 'control: startRouter captured the periodic reconciliation callback');
+    permitWatch = true;
+    const reconciling = ticks[0]();
+    await reached(g, 'the reconciliation listing agents');
+    cold.dispose();
+    g.release();
+    await cold.drainReads();
+    await reconciling;
+    assert.deepEqual(cold.watchedOutboxes(), [], 'the reconciliation that resumed after dispose() re-armed an outbox watcher');
+  } finally {
+    g.release(); fs.promises.readdir = real;
+    cold.stopRouter(); cold.dispose(); await cold.drainReads();
+    deletes(home);
+  }
+}
+
+test('a reconciliation whose agents list was open at dispose() does not re-arm an outbox watcher', async () => {
+  await reconcileAfterDisposeLeavesNoWatchers(HiveManager);
+});
+
+test('MUTANT: without the disposed reconciliation guard, an outbox watcher is re-armed', async () => {
+  const file = 'src/main/hive.ts';
+  const source = fs.readFileSync(file, 'utf8');
+  const guard = '    // A reconciliation already in flight outlives stopRouter(); it must not re-arm watchers.\n    if (this.readsRefused) return;\n';
+  assert.equal(source.split(guard).length - 1, 1, 'mutant target must be the one post-await disposal guard');
+  const { HiveManager: Mutant } = loadTs.fromText(file, source.replace(guard, ''));
+  await assert.rejects(() => reconcileAfterDisposeLeavesNoWatchers(Mutant), /re-armed an outbox watcher/,
+    'MUTANT LIVED: dropping the post-await disposal guard still left no watcher');
+});
+
 
 test('startRouter() on a disposed manager arms nothing (a power resume between dispose() and the delete); after reopen() it starts again', async (t) => {
   const { home, hive } = await floor();
