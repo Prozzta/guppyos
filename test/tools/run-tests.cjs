@@ -277,7 +277,7 @@ function testConsoleNode(env, { versions = process.versions, execPath = process.
 }
 
 // TEST-EXECPATH-ENV-108: under the Electron leg process.execPath is electron.exe; nodeEnv keeps it node.
-const nodeSpawn =(args, opts) => spawnSync(process.execPath, args, { ...opts, env: nodeEnv(opts && opts.env) });
+const nodeSpawn = (args, opts) => spawnSync(process.execPath, args, { ...opts, env: nodeEnv(opts && opts.env) });
 
 /** The limit to use: TEST_FILE_TIMEOUT_MS when it is a positive integer, else FILE_TIMEOUT_MS. */
 function fileTimeoutMs(env = process.env) {
