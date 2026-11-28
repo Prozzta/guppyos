@@ -248,14 +248,14 @@ async function reconcileAfterDisposeLeavesNoWatchers(Manager) {
   const agentsDir = path.resolve(path.join(cold.root(), 'agents'));
   const real = fs.promises.readdir;
   const g = gate();
-  fs.promises.readdir = function gatedAgentList(p, ...rest) {
-    if (path.resolve(String(p)) !== agentsDir) return real.call(fs.promises, p, ...rest);
-    return g.through(() => real.call(fs.promises, p, ...rest));
-  };
   try {
     cold.startRouter();
     await cold.routerIdle();
     assert.equal(ticks.length, 1, 'control: startRouter captured the periodic reconciliation callback');
+    fs.promises.readdir = function gatedAgentList(p, ...rest) {
+      if (path.resolve(String(p)) !== agentsDir) return real.call(fs.promises, p, ...rest);
+      return g.through(() => real.call(fs.promises, p, ...rest));
+    };
     permitWatch = true;
     const reconciling = ticks[0]();
     await reached(g, 'the reconciliation listing agents');
@@ -277,7 +277,7 @@ test('a reconciliation whose agents list was open at dispose() does not re-arm a
 
 test('MUTANT: without the disposed reconciliation guard, an outbox watcher is re-armed', async () => {
   const file = 'src/main/hive.ts';
-  const source = fs.readFileSync(file, 'utf8');
+  const source = fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
   const guard = '    // A reconciliation already in flight outlives stopRouter(); it must not re-arm watchers.\n    if (this.readsRefused) return;\n';
   assert.equal(source.split(guard).length - 1, 1, 'mutant target must be the one post-await disposal guard');
   const { HiveManager: Mutant } = loadTs.fromText(file, source.replace(guard, ''));
