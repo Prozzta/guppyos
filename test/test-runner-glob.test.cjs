@@ -883,7 +883,8 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // RUNNER-NOCOLOR-FORCECOLOR-STDERR: + 1 (colour-env). 676 + 1 = 677 (root test/*.test.cjs 630). Landed after RUNNER-REMOVEJAIL-FOLLOWS-JUNCTIONS-ELECTRON-108.
   // ELECTRON-LEG-RUNNER-SHELL-GUARD-108: + 1 (runner-shell-guard-108). 677 + 1 = 678 (root test/*.test.cjs 631).
   // FLOOR-INBOX-HOLD-DELAYS-BENCH-GO-108: + 1 (heavy-lock/heavy-slot-named-handoff-108). 678 + 1 = 679 (root test/*.test.cjs 631).
-  assert.equal(files.length, 679,`the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // HEAVY-LOCK-ADMITTED-BENCH-WHILE-HELD-108: + 1 (heavy-lock/heavy-held-one-run-108). 679 + 1 = 680 (root test/*.test.cjs 631). Landed after FLOOR-INBOX-HOLD-DELAYS-BENCH-GO-108.
+  assert.equal(files.length, 680,`the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');
