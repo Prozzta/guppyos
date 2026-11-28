@@ -39,6 +39,19 @@ async function awaitHostReceipts(rig, id) {
   }, { what: `host receipt of the PostInvocation for ${id}` });
 }
 
+// ——————————————————————————————————————————————————————————————————————————— preconditions
+
+// SETARCHIVED-SILENT-LOSS-F9B-108: without the fs-handle addon, renameWithRetry falls back to a plain
+// rename that refuses to replace a file its own process is reading. The rig's registry writes then fail
+// and F9b goes red for a reason that is not the code under test. The addon is gitignored and built by
+// postinstall, so a worktree with a junctioned node_modules lacks it. Fail first, by path.
+test('P0 the POSIX rename addon loads (win32)', async (t) => {
+  if (process.platform !== 'win32') return t.skip(`the POSIX rename addon is win32-only (platform ${process.platform})`);
+  const probed = path.join(__dirname, '..', 'resources', 'fs-handle', 'bin', 'guppy_fs_handle.node');
+  const cap = require('./load-ts.cjs')('src/main/atomicJson.ts').renameAddonCapability();
+  assert.equal(cap.available, true, `POSIX rename addon unavailable (${cap.reason}); expected ${probed}: build resources/fs-handle (npm install or tools/build-fs-handle.cjs)`);
+});
+
 // ——————————————————————————————————————————————————————————————————————————— the rig itself
 
 test('RIG the sandbox instance is isolated: own home, harness home, hive and pipe; the CLIs see only jailed paths; no model endpoint', T, async (t) => {
