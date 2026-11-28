@@ -25,7 +25,7 @@ const src = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
 const code = (p) => src(p).replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
 
 /** A recorder on fake timers and a fake histogram (values in ns, as Node reports them). */
-function rig({ origin = 1_000_000, startAt = origin + 500, windowMs } = {}) {
+function rig({ origin = 1_000_000, startAt = origin + 500, windowMs, Ctor = StartupTiming } = {}) {
   let now = startAt;
   const rows = [];
   // `timeout` is the stop timer; `probe` the latest blind-tick probe (STARTUP_BLIND_PROBE_MS), apart
@@ -33,7 +33,7 @@ function rig({ origin = 1_000_000, startAt = origin + 500, windowMs } = {}) {
   const hist = { enabled: false, max: 0, p99: 0, resets: 0,
     enable() { this.enabled = true; }, disable() { this.enabled = false; },
     reset() { this.resets++; this.max = 0; this.p99 = 0; }, percentile(p) { assert.equal(p, 99); return this.p99; } };
-  const rec = new StartupTiming({
+  const rec = new Ctor({
     origin, now: () => now, log: (r) => rows.push(r), histogram: () => hist, windowMs,
     setInterval: (fn, ms) => { timers.interval = { fn, ms }; return 'I'; },
     clearInterval: (h) => timers.cleared.push(h),
@@ -145,6 +145,41 @@ test('(1) LOAD-FLAKES-105: a block in the blind tick after a reset (the probe fi
   assert.equal(r.rows.find((x) => x.ev === 'end').loopWorstMs, 400);
 });
 
+test('(1) STARTUP-TIMING-162: stop folds an overdue pending blind probe into its final sample, at that sample\'s first clock read', () => {
+  const r = rig();
+  r.rec.start();
+  r.tick(12); // reset arms the next probe for t=520 ms after process start
+  r.advance(STARTUP_BLIND_PROBE_MS + 400); // the event loop was blocked; its probe callback has not run yet
+  r.rec.stop(); // the stop timer wins the timers turn and must not lose that blind interval
+  const loop = r.rows.find((x) => x.ev === 'loop');
+  const end = r.rows.find((x) => x.ev === 'end');
+  assert.deepEqual(loop.maxMs, [12, 400]);
+  assert.equal(end.loopWorstMs, 400);
+  assert.equal(end.loopWorstT, 1920, 'the final sample uses its own first clock read, not the prior sample or probe due time');
+});
+
+test('(1) STARTUP-TIMING-162 MUTANTS: removing the final fold, making it every-sample, or ignoring pending state dies', () => {
+  const source = src('src/main/startupTiming.ts').replace(/\r\n/g, '\n');
+  const make = (from, to) => {
+    assert.equal(source.split(from).length - 1, 1, `one mutation target: ${from}`);
+    return loadTs.fromText('src/main/startupTiming.ts', source.replace(from, to)).StartupTiming;
+  };
+  const finalFoldGone = make('Number.isFinite(pendingProbeLate) && pendingProbeLate > 0 ? pendingProbeLate : 0', '0');
+  const everySample = make('final && this.probeTimer !== null && this.probeDue !== null', 'this.probeTimer !== null && this.probeDue !== null');
+  const ignoresPending = make('final && this.probeTimer !== null && this.probeDue !== null', 'final && this.probeDue !== null');
+  const finalScenario = (Ctor) => {
+    const r = rig({ Ctor });
+    r.rec.start(); r.tick(12); r.advance(420); r.rec.stop();
+    return r.rows.find((x) => x.ev === 'end');
+  };
+  assert.notEqual(finalScenario(finalFoldGone).loopWorstMs, 400, 'without the final fold the late probe disappears');
+  assert.notEqual(finalScenario(everySample).loopWorstMs, 400, 'folding a pending probe in the ordinary sample misattributes it');
+  const r = rig({ Ctor: ignoresPending });
+  // A fired on-time probe leaves its due timestamp behind; only its pending timer distinguishes it from an overdue one.
+  r.rec.start(); r.advance(STARTUP_BLIND_PROBE_MS); r.timers.probe.fn(); r.advance(400); r.rec.stop();
+  assert.equal(r.rows.find((x) => x.ev === 'end').loopWorstMs, 400, 'without the pending check a fired probe is falsely folded at stop');
+});
+
 test('(1) LOAD-FLAKES-105: a sample\'s time is its FIRST clock read (the thread can be descheduled before the probe is armed)', () => {
   // bench 8 at 96 burners: armProbe read the clock first, the sample's time ~690 ms later, so the worst
   // second was stamped where no sample ran. Here every clock read inside a sample costs 700 ms.
@@ -157,7 +192,8 @@ test('(1) LOAD-FLAKES-105: a sample\'s time is its FIRST clock read (the thread 
     origin, log: (r) => rows.push(r), histogram: () => hist,
     now: () => { const v = now; if (inSample) { if (firstRead === null) firstRead = v - origin; now += 700; } return v; },
     setInterval: (f) => { fn = f; return 'I'; }, clearInterval() {},
-    setTimeout: () => 'T', clearTimeout() {}
+    // This fixture measures only the sample's first read; it intentionally has no pending probe.
+    setTimeout: (_fn, ms) => ms === STARTUP_BLIND_PROBE_MS ? null : 'T', clearTimeout() {}
   });
   rec.start();
   now += 1000; hist.max = 400e6; inSample = true; fn(); inSample = false;

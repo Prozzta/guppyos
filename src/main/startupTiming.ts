@@ -86,6 +86,7 @@ export class StartupTiming {
   private stopTimer: unknown = null;
   /** The blind-tick probe (STARTUP_BLIND_PROBE_MS) and the delay it measured, for the next sample. */
   private probeTimer: unknown = null;
+  private probeDue: number | null = null;
   private probeMs = 0;
   private rowStart = 0;
   private maxMs: number[] = [];
@@ -137,11 +138,16 @@ export class StartupTiming {
     (this.stopTimer as { unref?: () => void })?.unref?.();
   }
 
-  private sample(): void {
+  private sample(final = false): void {
     const h = this.hist;
     if (!this.open || !h) return;
-    const at = this.t();   // the sample's time is its first clock read; the probe armed below reads after it
-    const max = Math.max(h.max / 1e6, this.probeMs);
+    const now = this.d.now();
+    const at = this.t(now);   // the sample's time is its first clock read; the probe armed below reads after it
+    // The stop timer can run ahead of an overdue probe in the same timers turn.  Fold that pending
+    // blind interval into this final sample; ordinary samples still wait for the probe callback.
+    const pendingProbeLate = final && this.probeTimer !== null && this.probeDue !== null
+      ? now - this.probeDue : 0;
+    const max = Math.max(h.max / 1e6, this.probeMs, Number.isFinite(pendingProbeLate) && pendingProbeLate > 0 ? pendingProbeLate : 0);
     const p99 = h.percentile(99) / 1e6;
     h.reset();
     this.probeMs = 0;
@@ -157,6 +163,7 @@ export class StartupTiming {
   private armProbe(): void {
     const setT = this.d.setTimeout ?? ((fn, ms) => setTimeout(fn, ms));
     const due = this.d.now() + STARTUP_BLIND_PROBE_MS;
+    this.probeDue = due;
     this.probeTimer = setT(() => {
       this.probeTimer = null;
       if (!this.open) return;
@@ -239,7 +246,7 @@ export class StartupTiming {
   /** Flush and close: one summary row, then nothing more this run. Idempotent. */
   stop(): void {
     if (!this.open) return;
-    if (this.hist) this.sample();
+    if (this.hist) this.sample(true);
     this.flushLoop();
     this.flushPty();
     this.open = false;
@@ -250,6 +257,7 @@ export class StartupTiming {
     if (this.interval !== null) { clearI(this.interval); this.interval = null; }
     if (this.stopTimer !== null) { clearT(this.stopTimer); this.stopTimer = null; }
     if (this.probeTimer !== null) { clearT(this.probeTimer); this.probeTimer = null; }
+    this.probeDue = null;
     this.row('end', {
       t: this.t(),
       loopWorstMs: this.worst.ms, loopWorstT: this.worst.t,
