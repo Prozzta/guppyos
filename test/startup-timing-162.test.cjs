@@ -174,6 +174,9 @@ test('(1) STARTUP-TIMING-162 MUTANTS: removing the final fold, making it every-s
   };
   assert.notEqual(finalScenario(finalFoldGone).loopWorstMs, 400, 'without the final fold the late probe disappears');
   assert.notEqual(finalScenario(everySample).loopWorstMs, 400, 'folding a pending probe in the ordinary sample misattributes it');
+  const real = rig();
+  real.rec.start(); real.advance(STARTUP_BLIND_PROBE_MS); real.timers.probe.fn(); real.advance(400); real.rec.stop();
+  assert.equal(real.rows.find((x) => x.ev === 'end').loopWorstMs, 0, 'the real recorder does not fold an on-time fired probe at stop');
   const r = rig({ Ctor: ignoresPending });
   // A fired on-time probe leaves its due timestamp behind; only its pending timer distinguishes it from an overdue one.
   r.rec.start(); r.advance(STARTUP_BLIND_PROBE_MS); r.timers.probe.fn(); r.advance(400); r.rec.stop();
