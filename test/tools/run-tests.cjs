@@ -249,8 +249,35 @@ function prepareStartGate({ dir = os.tmpdir(), slots = startSlots() } = {}) {
   return { slots, dir: fs.mkdtempSync(path.join(dir, 'run-tests-start-')) };
 }
 
+// ELECTRON-LEG-RUNNER-SHELL-GUARD-108: the runner does not depend on how the caller's shell started it.
+const REFUSAL_EXIT = 2;
+/** Part 1: the message when this process is Electron that would start as an app (no ELECTRON_RUN_AS_NODE=1),
+ *  else null. Under such a launch every child would be built for a GUI app, not for Node. Pure. */
+function electronLegRefusal({ versions = process.versions, env = process.env } = {}) {
+  if (!versions || !versions.electron || env.ELECTRON_RUN_AS_NODE === '1') return null;
+  return `[test-runner] ELECTRON-LEG-RUNNER-SHELL-GUARD: refusing to start: this is electron.exe (Electron ${versions.electron}) without ELECTRON_RUN_AS_NODE=1, so it would start as an app, not as Node. Set ELECTRON_RUN_AS_NODE=1 for this process only, or run the plain node.`;
+}
+/** Part 2: on Windows the child env carries exactly one path key, spelled PATH (the value of PATH when the caller
+ *  had more than one spelling, else of the first). In place. Other platforms: Path and PATH are two variables. */
+function canonicalPathKey(env, platform = process.platform) {
+  if (platform !== 'win32') return env;
+  const keys = Object.keys(env).filter((k) => k.toUpperCase() === 'PATH');
+  if (!keys.length || (keys.length === 1 && keys[0] === 'PATH')) return env;
+  const value = keys.includes('PATH') ? env.PATH : env[keys[0]];
+  for (const k of keys) delete env[k];
+  env.PATH = value;
+  return env;
+}
+/** Part 3: the plain console Node a test should use (console-node.cjs reads it and checks it): the caller's own
+ *  GUPPY_TEST_CONSOLE_NODE, else this exe on plain node, else node on PATH under Electron; null = none found. */
+function testConsoleNode(env, { versions = process.versions, execPath = process.execPath, platform = process.platform } = {}) {
+  if (env.GUPPY_TEST_CONSOLE_NODE) return env.GUPPY_TEST_CONSOLE_NODE;
+  if (!versions || !versions.electron) return execPath;
+  return require('./console-node.cjs').nodeOnPath(env, platform);
+}
+
 // TEST-EXECPATH-ENV-108: under the Electron leg process.execPath is electron.exe; nodeEnv keeps it node.
-const nodeSpawn = (args, opts) => spawnSync(process.execPath, args, { ...opts, env: nodeEnv(opts && opts.env) });
+const nodeSpawn =(args, opts) => spawnSync(process.execPath, args, { ...opts, env: nodeEnv(opts && opts.env) });
 
 /** The limit to use: TEST_FILE_TIMEOUT_MS when it is a positive integer, else FILE_TIMEOUT_MS. */
 function fileTimeoutMs(env = process.env) {
@@ -342,6 +369,10 @@ function run({
   // Injected by the runner contract tests; production uses the OS-visible count.
   cores = os.availableParallelism(),
   processEnv = process.env,
+  // ELECTRON-LEG-RUNNER-SHELL-GUARD-108: injected by its tests; production reads this process.
+  platform = process.platform,
+  versions = process.versions,
+  execPath = process.execPath,
   jobRate = selfJobRate,
   // MUTANT-JOURNAL-GATE: the tree's mutant-runner journal (injected by the contract tests).
   mutantJournal = (root) => require('./mutant-runner-helper.cjs').journalState(root),
@@ -393,6 +424,11 @@ function run({
   const env = require('./ps-env.cjs').psEnv(processEnv, { temp: false });
   delete env.NODE_TEST_CONTEXT;
   require('./colour-env.cjs').scrubColourEnv(env);
+  // ELECTRON-LEG-RUNNER-SHELL-GUARD-108: exactly PATH, and the plain Node a test runs inside a PTY or as a child.
+  canonicalPathKey(env, platform);
+  const plainNode = testConsoleNode(env, { versions, execPath, platform });
+  if (plainNode) env.GUPPY_TEST_CONSOLE_NODE = plainNode;
+  else err('[test-runner] ELECTRON-LEG-RUNNER-SHELL-GUARD: no plain node on PATH for GUPPY_TEST_CONSOLE_NODE; a test that needs one fails by name');
   // Re-query after psEnv cloning: it preserves the process's job membership and explicit overrides.
   let rateNow;
   try { rateNow = jobRate({ env }); }
@@ -813,9 +849,12 @@ function totals(code, counts, laneState, log, failures = [], {
   return code;
 }
 
-module.exports = { psFailRows, psEventsScript, savePsEvents, startBackstop, BACKSTOP_PRELOAD, runNodeTest,endedWithoutExit, fileTimeLines, totals, prepareFileJob, pruneFileJobs, FILE_JOB_DIR, FILE_JOB_PRELOAD, fileJobStrict, jobJoinFailures, fileJobVerdict, prepareTempJail, removeRunDir, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, cappedCores, selfJobRate, HEAVYJOB_HELPER, CPU_RATE_50_PERCENT, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, renderLaneFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
+module.exports = { psFailRows, psEventsScript, savePsEvents, startBackstop, BACKSTOP_PRELOAD, runNodeTest,endedWithoutExit, fileTimeLines, totals, prepareFileJob, pruneFileJobs, FILE_JOB_DIR, FILE_JOB_PRELOAD, fileJobStrict, jobJoinFailures, fileJobVerdict, prepareTempJail, removeRunDir, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, cappedCores, selfJobRate, HEAVYJOB_HELPER, CPU_RATE_50_PERCENT, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, renderLaneFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG, REFUSAL_EXIT, electronLegRefusal, canonicalPathKey, testConsoleNode };
 
 if (require.main === module) {
+  // ELECTRON-LEG-RUNNER-SHELL-GUARD-108: first, before anything reads the tree or starts a child.
+  const refusal = electronLegRefusal();
+  if (refusal) { fs.writeSync(2, `${refusal}\n`); process.exit(REFUSAL_EXIT); }
   const repoRoot = path.resolve(__dirname, '..', '..');
   // WORKTREE-NATIVE-BUILD-GAP: a tree missing its native builds or the patched xterm addon
   // produced false reds and an uncapped run; refuse it up front (tools/worktree-setup.cjs fixes it).
