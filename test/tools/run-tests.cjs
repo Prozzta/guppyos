@@ -425,7 +425,7 @@ function run({
     return runGated({ filters, rel, renderRel, env, gate, jail, spawn, cwd, timeoutMs, isTTY, eventsFile, readFile, removeFile, failureFile, writeFailureFile, watchdog, backstop, fileJob, log, err, perfDir, readdir, concurrency, cores });
   } finally {
     if (gate) { try { removeRunDir(gate.dir); } catch (e) { err(`[test-runner] the run's start-gate folder could not be removed (${e.code || e.message}): ${gate.dir}`); } }
-    if (jail) { try { removeJail(jail.root); } catch (e) { err(`[test-runner] the run's temp folders could not be removed (${e.code || e.message}; a child still holds a file): ${jail.root} (TEST-TEMP-HYGIENE)`); } }
+    if (jail) { try { removeJail(jail.root); } catch (e) { err(`[test-runner] the run's temp folders could not be removed (${e.code || e.message}): ${jail.root} (TEST-TEMP-HYGIENE)`); } }
   }
 }
 
