@@ -69,11 +69,11 @@ K.held = async (M = HJ) => {
     const states = await fourRuns(x, 'a', 100);
     assert.deepEqual(states, ['light', 'wait', 'wait', 'wait'], `ONE RUN WHILE ANOTHER AGENT HOLDS: the first is light, the rest wait their turn (${what})`);
     assert.deepEqual(x.l.queueSnapshot().waiters.map((w) => w.agentId), ['a'], `the second run queues its agent (${what})`);
-    // Its turn: the holder ends, and the waiting run takes the slot (a real lease, not light).
+    // Its turn: the holder ends, the slot is reserved for the waiting agent, and its run goes ahead
+    // (light: nobody else holds now, so the plain rules apply).
     x.l.callDone('b', 'hb');
-    const turn = await ask(x, 'a', 103);
-    assert.equal(turn.state, 'held', `THE SECOND RUN WAITS ITS TURN, THEN TAKES THE SLOT (${what})`);
-    assert.ok(turn.leaseId, 'a real lease');
+    assert.deepEqual(x.l.queueSnapshot().reserved.map((r) => r.agentId), ['a'], `THE SECOND RUN WAITS ITS TURN: the freed slot is its agent's (${what})`);
+    assert.equal((await ask(x, 'a', 103)).state, 'light', `THE SECOND RUN WAITS ITS TURN, THEN RUNS (${what})`);
   }
 };
 test("UHera's 4-run case: while another agent holds, one call runs one test light and the rest wait (script, loops, both legs)", () => K.held());

@@ -97,20 +97,35 @@ K.loopLight = async (M = HJ) => {
   x.alive.add(1201);
   const one = await ask(x, 'a', 1201, { files: ['test/one.test.cjs'] });
   assert.deepEqual([one.state, one.why], ['light', "the call's own node --test"], "A PER-FILE LOOP'S RUNS ARE LIGHT (while another agent holds)");
-  x.tick(5 * 60_000);   // later in the same call: still open
-  const two = await ask(x, 'a', 1202, { files: ['test/two.test.cjs'] });
-  assert.deepEqual([two.state, two.why], ['light', "the call's own node --test"], 'EVERY RUN OF THE LOOP IS LIGHT, NOT ONLY THE FIRST');
-  x.alive.delete(1201);
-  assert.equal((await ask(x, 'a', 1203, { files: ['a.cjs', 'b.cjs'] })).state, 'wait', 'a loop run matches single-file processes only');
-  x.images.set(51, 'node.exe');
+  // HEAVY-LOCK-ADMITTED-BENCH-WHILE-HELD-108 (F-B; the Human, 2026-11-28): while ANOTHER agent holds, the
+  // call's one light run is spent, so the loop's next run waits its turn (heavy-held-one-run-108).
+  x.tick(5 * 60_000);
+  assert.equal((await ask(x, 'a', 1202, { files: ['test/two.test.cjs'] })).state, 'wait', "F-B: the loop's second run waits while another agent holds");
+  // The loop's later runs are bound with nobody else holding (beside a holder they wait either way).
+  const y = rig(M);
+  y.images.set(50, 'bash.exe');
+  y.l.noteCall('a', 'c1', 'for f in one two; do node --test test/$f.test.cjs | tail -3; done');
+  y.alive.add(1211);
+  assert.equal((await ask(y, 'a', 1211, { files: ['test/one.test.cjs'] })).state, 'light');
+  y.tick(5 * 60_000);   // later in the same call: still open
+  const two = await ask(y, 'a', 1212, { files: ['test/two.test.cjs'] });
+  assert.deepEqual([two.state, two.why], ['light', "the call's own node --test"], 'EVERY RUN OF THE LOOP IS LIGHT, NOT ONLY THE FIRST (nobody else holds)');
+  // The rest beside the holder, each on a call whose one light run is still unspent.
+  const z = rig(M);
+  z.l.acquire('b', H, 'npm test', 'hb', false);
+  z.images.set(50, 'bash.exe');
+  z.images.set(51, 'node.exe');
+  z.l.noteCall('a', 'c1', 'for f in one two; do node --test test/$f.test.cjs | tail -3; done');
+  assert.equal((await ask(z, 'a', 1203, { files: ['a.cjs', 'b.cjs'] })).state, 'wait', 'a loop run matches single-file processes only');
+  z.l.noteCallEnd('a', 'c1');
+  assert.equal((await ask(z, 'a', 1205, { files: ['test/one.test.cjs'] })).state, 'wait', 'A LOOP RUN MATCHES ONLY WHILE ITS CALL IS OPEN');
   // HEAVY-RESERVATION-BIND-108: under another program it is not the loop's run, but one test file
   // started by a script is light too (one at a time).
-  const under = await ask(x, 'a', 1204, { files: ['test/one.test.cjs'], ppid: 51 });
+  z.l.noteCall('a', 'c3', 'for f in one two; do node --test test/$f.test.cjs | tail -3; done');
+  const under = await ask(z, 'a', 1204, { files: ['test/one.test.cjs'], ppid: 51 });
   assert.deepEqual([under.state, under.why], ['light', 'one test file, one at a time'], "a process under another program is not the loop's (light by the single-file rule)");
-  x.l.noteCallEnd('a', 'c1');
-  assert.equal((await ask(x, 'a', 1205, { files: ['test/one.test.cjs'] })).state, 'wait', 'A LOOP RUN MATCHES ONLY WHILE ITS CALL IS OPEN');
-  x.l.noteCall('a', 'c2', 'npx tsc --noEmit && node --test test/a.test.cjs');
-  assert.equal((await ask(x, 'a', 1206, { files: ['test/a.test.cjs'] })).state, 'light', "A TSC CHAIN'S RUN IS LIGHT");
+  z.l.noteCall('a', 'c2', 'npx tsc --noEmit && node --test test/a.test.cjs');
+  assert.equal((await ask(z, 'a', 1206, { files: ['test/a.test.cjs'] })).state, 'light', "A TSC CHAIN'S RUN IS LIGHT");
 };
 test("Jim MUST 1: a per-file loop's runs are light while the call is open (single files, under its shell); a tsc chain's run is light", () => K.loopLight());
 
