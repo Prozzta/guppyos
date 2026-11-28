@@ -102,8 +102,34 @@ export interface LedgerEntryLike {
   closedAt?: number | null;
 }
 
-/** The received mail of any agent, by id (main: hive.mail.ledger(id).entries; unknown = empty). */
-export interface WakeLedgers { entries(agentId: string): readonly LedgerEntryLike[] }
+/**
+ * The received mail of any agent, by id (main: hive.mail.ledger(id).entries; unknown = empty), and
+ * the ids of the cards an agent is WORKING (main: workingCards over tasks.json). A reader with no
+ * `working` knows of no board: rule (d) then never fires.
+ */
+export interface WakeLedgers {
+  entries(agentId: string): readonly LedgerEntryLike[];
+  working?(agentId: string): Iterable<string>;
+}
+
+/** A card as tasks.json holds it, as far as rule (d) reads it. */
+export interface WorkingCardLike { id: string; assignee?: string; status?: string }
+
+/** Card ids are matched without case: the board writes them in capitals, memory keys in lower case. */
+const cardKey = (id: string): string => id.trim().toLowerCase();
+
+/**
+ * FLOOR-INBOX-HOLD-DELAYS-BENCH-GO (1.1.108): the cards `agentId` is working, by the board: the
+ * assignee is this agent AND the status is doing. A card merely assigned (todo, blocked, done) is
+ * not being worked, and a doing card of another agent is that agent's.
+ */
+export function workingCards(tasks: readonly WorkingCardLike[] | undefined, agentId: string): string[] {
+  const out: string[] = [];
+  for (const c of tasks ?? []) {
+    if (c && c.assignee === agentId && c.status === 'doing' && typeof c.id === 'string') out.push(c.id);
+  }
+  return out;
+}
 
 /** The subject relays the Human ("spec correction from the Human"), or a broadcast's body does ("the
  *  Human's rule"); an addressed cc that merely quotes the Human in its body is not a relay. */
@@ -134,7 +160,12 @@ function stillOwed(x: LedgerEntryLike): boolean {
  *   (c)  the recipient has an open ask to the SENDER (in the sender's ledger) and this message does
  *        not name some other card: it is the result, however it was labelled (McCey's "RAYB-9 done"
  *        sent as inform to god). A message naming a card that matches none of them is about other
- *        work and stays quiet.
+ *        work and stays quiet;
+ *   (d)  it names a card the recipient is working by the BOARD (tasks.json: assignee = recipient,
+ *        status doing), whoever sent it and whatever it replies to: god's bench GO "in the slot
+ *        after Andy's suite", sent as agree in_reply_to JIM's static PASS on the card Creed was
+ *        doing, sat held for 30 min (2026-11-25, mail 5239f2). No ask is needed: a GO is no reply
+ *        to anything the recipient owes.
  * Only an unsolicited status FYI is left to the hold. The ledgers are read, never written; a reader
  * that throws is caught by mailWakeClass and fails open (it wakes).
  */
@@ -149,6 +180,7 @@ export function solicitedQuietMail(e: MailWakeFacts, recipientId: string, ledger
   const sameThread = (x: OwedThreads | undefined) => !!x && ((!!e.cardId && x.cards.has(e.cardId)) || (!!e.conversation && x.conversations.has(e.conversation)));
   const toSender = index.of(e.from).owedFrom.get(recipientId);
   if (toSender && (!e.cardId || sameThread(toSender))) return true;
+  if (e.cardId && index.working(recipientId).has(cardKey(e.cardId))) return true;
   return sameThread(index.of(recipientId).owed);
 }
 
@@ -172,7 +204,11 @@ interface HolderIndex {
  * three walks per id. The answers are the ones the walks gave. A reader that throws is not kept:
  * it is asked again for the next id, and throws again (mailWakeClass fails open, as before).
  */
-export interface WakeLedgerIndex { of(holder: string): HolderIndex }
+export interface WakeLedgerIndex {
+  of(holder: string): HolderIndex;
+  /** The cards the agent is working (rule d), as card keys; the board is read once per agent. */
+  working(agentId: string): ReadonlySet<string>;
+}
 
 const WAKE_LEDGER_INDEX = Symbol('wakeLedgerIndex');
 function isWakeLedgerIndex(x: WakeLedgers | WakeLedgerIndex): x is WakeLedgerIndex {
@@ -202,7 +238,16 @@ export function indexWakeLedgers(ledgers: WakeLedgers): WakeLedgerIndex {
     made.set(holder, h);
     return h;
   };
-  return { of, [WAKE_LEDGER_INDEX]: true } as WakeLedgerIndex;
+  const boards = new Map<string, ReadonlySet<string>>();
+  const working = (agentId: string): ReadonlySet<string> => {
+    const known = boards.get(agentId);
+    if (known) return known;
+    const cards = new Set<string>();
+    for (const id of ledgers.working?.(agentId) ?? []) cards.add(cardKey(id));
+    boards.set(agentId, cards);
+    return cards;
+  };
+  return { of, working, [WAKE_LEDGER_INDEX]: true } as WakeLedgerIndex;
 }
 
 export type MailWakeClass = 'wake' | 'quiet';

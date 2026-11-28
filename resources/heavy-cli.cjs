@@ -78,7 +78,7 @@ function describe(b) {
     if (b.refused === 'self') return 'heavy: name another agent, not yourself\n';
     if (b.refused === 'unknown') return `heavy: refused: no agent ${b.to} is on the floor (heavy status lists the queue; an agent id is like creed-mukyiphw)\n`;
     if (b.refused) return 'heavy: refused: only a holder, an agent with a slot reserved, or god may name the next holder\n';
-    return `heavy: the next freed slot goes to ${b.to} ${b.queued ? '(queued: now at the head of the queue)' : '(not queued yet: it goes to the head when it next asks)'}\n`;
+    return `heavy: the next freed slot goes to ${b.to} ${b.queued ? '(queued: now at the head of the queue)' : b.reserved ? '(not queued: a slot is free now, so it is reserved for it and it is told)' : '(not queued: when the slot frees it is reserved for it and it is told)'}\n`;
   }
   const to = b.to === 'not-queued' ? ' (the agent you named is not queued, so it went in queue order)' : '';
   // HEAVY-HANDOFF-RACE (e): a holder's release never says "nothing".

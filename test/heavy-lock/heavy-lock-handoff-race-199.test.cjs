@@ -101,16 +101,25 @@ K.nextAhead = async (M = HJ) => {
   assert.deepEqual(waiters(x), ['creed', 'andy'], 'THE NAMED AGENT GOES TO THE HEAD WHEN IT ASKS');
   x.l.callDone('jim', 'j1');
   assert.deepEqual(reservedFor(x), ['creed'], 'THE AUTO-RELEASE HONOURS heavy next');
-  // Named while the slot is free (nothing to wait for): it simply takes the slot, and the name goes.
+  // Named while the slot is free: since 1.1.108 (FLOOR-INBOX-HOLD-DELAYS-BENCH-GO) it is reserved for it
+  // at once and the name is spent (heavy-slot-named-handoff-108 pins that); it takes the slot.
   const y = rig(M, { isGod: (a) => a === 'god' });
-  await y.l.lease('god', { op: 'next', to: 'creed' });
-  assert.equal((await y.status('god')).next, 'creed');
+  assert.deepEqual(await y.l.lease('god', { op: 'next', to: 'creed' }), { state: 'next', to: 'creed', queued: false, reserved: true });
+  assert.deepEqual(reservedFor(y), ['creed']);
   assert.equal(y.l.acquire('creed', H, 'bash cut.sh', 'c1', false).allow, true);
-  assert.equal((await y.status('god')).next, null, 'THE NAME IS FORGOTTEN ONCE IT HOLDS');
   y.l.callDone('creed', 'c1');
   assert.equal(y.l.acquire('andy', H, 'npm test', 'a1', false).allow, true);
   assert.equal(y.l.acquire('creed', H, 'npm test', 'c2', false).allow, false);
   assert.deepEqual(waiters(y), ['creed'], 'and creed waits in queue order afterwards');
+  // A name that stands (two slots and a shared build runs, so the whole machine is not free to reserve)
+  // goes once its agent holds a slot.
+  const BUILD = { heavy: true, kind: 'build' };
+  const z = rig(M, { isGod: (a) => a === 'god', limit: () => 2 });
+  z.l.acquire('jim', BUILD, 'npm run build', 'j1', false);
+  await z.l.lease('god', { op: 'next', to: 'creed' });
+  assert.equal((await z.status('god')).next, 'creed');
+  assert.equal(z.l.acquire('creed', BUILD, 'npm run build', 'c1', false).allow, true);
+  assert.equal((await z.status('god')).next, null, 'THE NAME IS FORGOTTEN ONCE IT HOLDS');
 };
 test('(a) an agent not queued yet goes to the head when it next asks; the name goes once it holds', () => K.nextAhead());
 
@@ -460,7 +469,7 @@ test('the heavy CLI: `heavy next <agent>`, and the `you:` line of `heavy status`
   assert.deepEqual(CLI.parseArgs(['next', 'creed-mukyiphw']), { op: 'next', to: 'creed-mukyiphw' });
   for (const bad of [['next'], ['next', 'a b'], ['next', '$(x)'], ['next', 'a', 'b'], ['next', '--to', 'a']]) assert.throws(() => CLI.parseArgs(bad), undefined, JSON.stringify(bad));
   assert.equal(CLI.describe({ state: 'next', to: 'creed', queued: true }), 'heavy: the next freed slot goes to creed (queued: now at the head of the queue)\n');
-  assert.equal(CLI.describe({ state: 'next', to: 'creed', queued: false }), 'heavy: the next freed slot goes to creed (not queued yet: it goes to the head when it next asks)\n');
+  assert.equal(CLI.describe({ state: 'next', to: 'creed', queued: false }), 'heavy: the next freed slot goes to creed (not queued: when the slot frees it is reserved for it and it is told)\n');
   assert.equal(CLI.describe({ state: 'next', to: 'creed', queued: false, refused: 'not-a-holder' }), 'heavy: refused: only a holder, an agent with a slot reserved, or god may name the next holder\n');
   assert.equal(CLI.describe({ state: 'next', to: 'jim', queued: false, refused: 'self' }), 'heavy: name another agent, not yourself\n');
   const st = (you, next = null) => CLI.describe({ state: 'status', holders: ['jim'], reserved: [], waiters: ['creed'], next, you });
@@ -543,7 +552,7 @@ const MUTANTS = [
   { name: 'a reservation lapsing under its owner\'s hold queues the owner again', edits: [['      if (this.holders.has(agentId)) { passed = true; continue; }', '']],
     killer: 'reservedLapseHeld', dies: /A RESERVATION THAT LAPSES UNDER ITS OWNER'S OWN HOLD DOES NOT QUEUE THE OWNER AGAIN/ },
   // (a)
-  { name: 'the grant ignores the name (required: it is re-read at every grant)', edits: [['    const ni = this.nextUp ? this.waiters.findIndex((w) => w.agentId === this.nextUp) : -1;', '    const ni = -1;']],
+  { name: 'the grant ignores the name (required: it is re-read at every grant)', edits: [['    if (ni > 0) this.waiters.unshift(...this.waiters.splice(ni, 1));\n', '']],
     killer: 'nextHonoured', dies: /THE AUTO-RELEASE HONOURS heavy next over release --to/ },
   { name: 'a named agent not queued yet joins at the back', edits: [['    if (agentId === this.nextUp) { this.waiters.unshift(this.waiters.pop()!); return 1; }\n', '']],
     killer: 'nextAhead', dies: /THE NAMED AGENT GOES TO THE HEAD WHEN IT ASKS/ },

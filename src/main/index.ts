@@ -140,7 +140,7 @@ import { createTerminalMirror, mirrorParseMs } from './terminalMirror';
 import { MirrorCostGuard, calibrationSample, mirrorOffNotice, mirrorOffWords } from './mirrorCost';
 import { ShadowDiff } from './termShadow';
 import { createScreenGate, screenGateSourceOf } from './screenGate';
-import { HeavyJobLock, heavyLimit, heavySlotFreeNotice, heavyWaitLapsedNotice, heavyUnlimitedNotice, probeProcesses, processImage } from './heavyJob';
+import { HeavyJobLock, heavyLimit, heavySlotFreeNotice, heavySlotNamedNotice, heavyWaitLapsedNotice, heavyUnlimitedNotice, probeProcesses, processImage } from './heavyJob';
 import { ScratchDiskManager } from './scratchDisk';
 import { removePathLinkSafe } from './linkSafeRemove';
 import { HeavyJobs, approvesWithoutAsking, heavyCpuOptions } from './heavyCpu';
@@ -231,7 +231,7 @@ import { newBreadcrumbMemory, shouldLogBreadcrumb } from './wakeBreadcrumb';
 import { forgetWakeRows, newWakeRowState, planWakeRow, takeFolded } from './wakeRowPolicy';
 import { WakeTelemetry } from './wakeTelemetry';
 import { inboxWakeTextForProvider } from '../shared/hiveNudge';
-import { indexWakeLedgers, quietHolds, quietMailHoldMs, solicitedQuietMail } from '../shared/mailWakeClass';
+import { indexWakeLedgers, quietHolds, quietMailHoldMs, solicitedQuietMail, workingCards } from '../shared/mailWakeClass';
 import { mailNudgeMode, type MailNudgeMode } from './mailSurface';
 import { fetchHireManifest, readHireManifestFiles } from './hire';
 import { HIRE_LINK_SCHEMES, isHireLinkArg, parseHireDeepLink, type HireManifest } from '../shared/hire';
@@ -1311,7 +1311,9 @@ inboxWake = new InboxWakeBridge({
       // thread with an open ask between the two. The asks it sent sit in the RECEIVERS' ledgers.
       // LAG-QUIET-PENDING-108: one index for the pass. Each holder's ledger is read (an existsSync
       // of its inbox) and walked once, however many pending ids ask about it.
-      const ledgers = indexWakeLedgers({ entries: (holder: string) => Object.values(hive.mail.ledger(holder).entries) });
+      // FLOOR-INBOX-HOLD-DELAYS-BENCH-GO (1.1.108): rule (d) reads the board (tasks.json, the cached
+      // read): mail naming a card this agent is doing wakes it, with no ask between the two.
+      const ledgers = indexWakeLedgers({ entries: (holder: string) => Object.values(hive.mail.ledger(holder).entries), working: (id: string) => workingCards((hive.tasks() as { tasks?: HiveTask[] }).tasks, id) });
       return quietHolds(ids.map((id) => entries[id]).filter((e) => !!e), hookServer.mailChannel(agentId).mode, holdMs, now,
         (e) => solicitedQuietMail(e, agentId, ledgers));
     }
@@ -1478,6 +1480,8 @@ const heavyLock = new HeavyJobLock({
   parentImage: processImage,
   // HEAVY-HANDOFF-RACE (a): god may name the next holder (`heavy next`) without holding a slot.
   isGod: (agentId) => hive.isGod(agentId),
+  // FLOOR-INBOX-HOLD-DELAYS-BENCH-GO (1.1.108): an agent named next that never queued is told too.
+  notifyNamed: (agentId, until) => notifyHeavySlotNamed(agentId, until),
   // HEAVY-LOCK-SELF-WAIT: a queued agent is told when a slot is RESERVED for it, so it never polls.
   alive: (agentId) => [...ptyToAgent.values()].includes(agentId),
   notify: (agentId, kind, until) => notifyHeavySlotFree(agentId, kind, until),
@@ -1628,6 +1632,12 @@ heavyLock.onChange(() => {
 /** HEAVY-LOCK-SELF-WAIT: send the "slot free" notice (heavyJob.heavySlotFreeNotice) on both rails. */
 function notifyHeavySlotFree(agentId: string, kind: string, until: number): void {
   const n = heavySlotFreeNotice(agentId, kind, until);
+  try { hive.send(n.message as Partial<HiveMessage>, n.from); } catch { /* best effort */ }
+  try { control.steer(agentId, n.steer); } catch { /* best effort */ }
+}
+/** FLOOR-INBOX-HOLD-DELAYS-BENCH-GO (1.1.108): the same, for an agent named next that never queued. */
+function notifyHeavySlotNamed(agentId: string, until: number): void {
+  const n = heavySlotNamedNotice(agentId, until);
   try { hive.send(n.message as Partial<HiveMessage>, n.from); } catch { /* best effort */ }
   try { control.steer(agentId, n.steer); } catch { /* best effort */ }
 }

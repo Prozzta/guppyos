@@ -8,6 +8,19 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Mail about the card an agent is working on wakes it at once.** A status mail (inform or agree)
+  that answered nothing the agent had asked was held for up to 30 minutes, even when it named the
+  card the agent was working on. A go-ahead for a test slot, sent as a reply to another agent's
+  mail, sat held for 30 minutes that way. Mail now wakes the agent when it names a card that the
+  board shows as that agent's and in progress. Other status mail is held as before.
+  (FLOOR-INBOX-HOLD-DELAYS-BENCH-GO-108)
+- **`heavy next <agent>` hands the slot to an agent that is not in the queue.** The name used to
+  matter only once the agent asked for the slot itself, so a slot that came free with nobody
+  queued stayed free and the agent was not told. Now the slot is reserved for the named agent for
+  5 minutes when it comes free, or at once when it is already free, and the agent is woken with a
+  "HEAVY SLOT FREE" notice. It gets the whole machine, and goes ahead of the queue. If it does not
+  start its job in time the slot passes on and it is told. Agents in the queue are served as
+  before. (FLOOR-INBOX-HOLD-DELAYS-BENCH-GO-108)
 - **A background save is no longer lost when something is reading the file (Windows).** The async
   writers (write-behind files, capacity, the task ledger guard) published with a plain rename, which
   Windows refuses while a reader holds the file open. They retried for about 200 ms and then gave up:

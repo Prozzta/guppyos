@@ -2768,6 +2768,9 @@ export interface HeavyLockDeps {
   log?: (row: Record<string, unknown>) => void;
   /** HEAVY-LOCK-SELF-WAIT: tell a queued agent that a slot is RESERVED for it until `until` (ms). */
   notify?: (agentId: string, kind: HeavyKind, until: number) => void;
+  /** FLOOR-INBOX-HOLD-DELAYS-BENCH-GO (1.1.108): tell an agent NAMED next (`heavy next`) that never
+   *  queued that the slot is reserved for it (heavySlotNamedNotice). */
+  notifyNamed?: (agentId: string, until: number) => void;
   /** A limit switched to Off releases every queued/reserved agent without a reservation. */
   notifyUnlimited?: (agentId: string, kind: HeavyKind) => void;
   /** LOCK-WAIT-NOTICES: tell an agent its reservation lapsed unused ('expired'), so it has left the
@@ -2837,9 +2840,10 @@ export interface HeavyLeaseRequest {
  *  `position` (1-based), or none of these. */
 export type HeavyStanding = { holding: boolean; reserved: string | null; position: number | null };
 /** HEAVY-HANDOFF-RACE (a): the answer to `heavy next <agent>`. `queued`: the agent was already queued (it
- *  is at the head now); else it goes to the head when it next asks. `refused`: the caller holds no slot,
+ *  is at the head now); else the slot is reserved for it when it frees (`reserved`: it was free, and is
+ *  reserved for it now). `refused`: the caller holds no slot,
  *  has none reserved and is not god ('not-a-holder'), or named itself ('self'): nothing changed. */
-export type HeavyNextAnswer = { state: 'next'; to: string; queued: boolean; refused?: 'not-a-holder' | 'self' | 'unknown' };
+export type HeavyNextAnswer = { state: 'next'; to: string; queued: boolean; reserved?: true; refused?: 'not-a-holder' | 'self' | 'unknown' };
 /** LOCK-WAIT-NOTICES / HEAVY-HANDOFF-RACE (c): why an agent is told about its wait: 'expired' (its unused
  *  reservation passed on and it is no longer queued), 'requeued' (it passed on and the agent is queued
  *  again, at the back, once), 'stale' (kept for main's notice function; never sent since HEAVY-QUEUE-WAIT-DROPS). */
@@ -2908,6 +2912,22 @@ export function heavySlotFreeNotice(agentId: string, kind: string, until: number
   const at = `${new Date(until).toISOString().slice(11, 16)}Z`;
   const subject = `HEAVY SLOT FREE: the ${kind} you were denied can run now; the slot is reserved for you until ${at}`;
   const body = `The heavy-job slot you were queued for is now reserved for you until ${at}. Run your ${kind} now if you still need it; if you do not run it by then, it passes to the next agent in the queue. If you no longer need it, run \`heavy release\` so it passes on at once (\`heavy release --to <agent>\` gives it to that queued agent first). No reply is needed.`;
+  return { message: { to: agentId, act: 'inform', requires_reply: false, subject, body, wake: 'now' }, from: 'system', steer: `${subject}.` };
+}
+
+/**
+ * FLOOR-INBOX-HOLD-DELAYS-BENCH-GO (1.1.108): the "slot free" notice for an agent that was NAMED next
+ * (`heavy next`) and never queued: no call of its own was denied, so the text says who handed it the
+ * slot and what happens if it is not used. Same rails and wake as heavySlotFreeNotice. Pure.
+ */
+export function heavySlotNamedNotice(agentId: string, until: number): {
+  message: { to: string; act: 'inform'; requires_reply: false; subject: string; body: string; wake: 'now' };
+  from: 'system';
+  steer: string;
+} {
+  const at = `${new Date(until).toISOString().slice(11, 16)}Z`;
+  const subject = `HEAVY SLOT FREE: you were named next for the heavy slot; it is reserved for you until ${at}`;
+  const body = `You were named the next holder of the heavy-job slot (\`heavy next\`) and it is free: it is reserved for you until ${at}. Start the heavy job you were waiting to run now. If you do not start it by then, the slot passes on and you are not queued: run your job then and the lock queues you as usual. If you do not need the slot, run \`heavy release\` so it passes on at once. No reply is needed.`;
   return { message: { to: agentId, act: 'inform', requires_reply: false, subject, body, wake: 'now' }, from: 'system', steer: `${subject}.` };
 }
 
@@ -2981,7 +3001,7 @@ export class HeavyJobLock {
   /** LOCK-WAIT-NOTICES: the agent whose acquire is running (its own answer tells it; no notice). */
   private calling: string | null = null;
   /** HEAVY-HANDOFF-RACE (a): the agent the next freed slot goes to (`heavy next <agent>`), ahead of the
-   *  queue: moved to its head when queued, put there when it next asks. Cleared once it is reserved,
+   *  queue: moved to its head when queued, else handed the slot when it frees. Cleared once it is reserved,
    *  holds a slot, or is gone. */
   private nextUp: string | null = null;
   /** Jim HHR NIT 1: when the name was given; one nobody asks for expires after HEAVY_TTL_MS. */
@@ -3188,6 +3208,8 @@ export class HeavyJobLock {
     // at a job's end honours `heavy next`; `heavy release --to` after it came too late).
     const ni = this.nextUp ? this.waiters.findIndex((w) => w.agentId === this.nextUp) : -1;
     if (ni > 0) this.waiters.unshift(...this.waiters.splice(ni, 1));
+    // FLOOR-INBOX-HOLD-DELAYS-BENCH-GO (1.1.108): a named agent that never queued is handed the slot too.
+    if (ni < 0) this.handNamed(limit);
     // HEAVY-SLOT-EXCLUSIVE-192: FIFO; an exclusive waiter at the head waits for the empty machine,
     // and the waiters behind it wait with it.
     while (this.waiters.length && this.fits(this.waiters[0].agentId, this.waiters[0].exclusive, limit)) {
@@ -3207,6 +3229,29 @@ export class HeavyJobLock {
       try { this.d.notify?.(w.agentId, w.kind, until); } catch { /* best effort: the reservation stands */ }
     }
     this.arm();
+  }
+
+  /**
+   * FLOOR-INBOX-HOLD-DELAYS-BENCH-GO (1.1.108), F3 (2026-11-25: god keeps the bench line by mail, so
+   * the agents wait for a GO and are never denied or queued; UHera's suite ended with nobody queued,
+   * and the GO for Creed that followed by mail sat held for 30 min). The agent named by `heavy next`
+   * that is NOT queued is handed the free slot all the same: reserved for HEAVY_RESERVE_MS, as for a
+   * waiter, and told (notifyNamed). Its kind of job is unknown, so it gets the whole machine, as a
+   * suite or a bench needs: only when no one else holds or has a slot, and nothing joins it. It goes
+   * ahead of the queue, as a named waiter does. It never asked, so an unused hand-off is not queued
+   * again (`lapsed`): it passes on and the agent is told ('expired'). A name that is a holder or
+   * reserved already, or gone from the floor, stands until it expires.
+   */
+  private handNamed(limit: number): void {
+    const to = this.nextUp;
+    if (!to || this.holders.has(to) || this.reservations.has(to)) return;
+    if (!this.alive(to) || !this.fits(to, true, limit)) return;
+    const until = this.now() + HEAVY_RESERVE_MS;
+    this.reservations.set(to, { kind: 'suite', until, procs: [], hooked: true, exclusive: true, lapsed: true });
+    this.nextUp = null;   // the name is spent
+    this.log({ kind: 'heavy-lock', action: 'reserve', agentId: to, heavyKind: 'suite', until: new Date(until).toISOString(), waitedMs: 0, exclusive: true, named: true });
+    this.changed();
+    try { this.d.notifyNamed?.(to, until); } catch { /* best effort: the reservation stands */ }
   }
 
   /** LAG-NAMED-STALLS-RESIDUAL-108: would `settle` classify this call again? The hook asks first, so
@@ -3440,9 +3485,10 @@ export class HeavyJobLock {
    *  queue head, Andy, and Jim's `heavy release --to creed` right after it found nothing to release: the
    *  cut's priority was lost). The holder, an agent with a slot reserved, or god names the NEXT holder
    *  AHEAD of time (`heavy next <agent>`), and the release at the job's end honours it: a queued agent
-   *  moves to the head now; one not queued yet goes to the head when it next asks (it is not queued for
-   *  it: a deny is what tells an agent to wait). One name at a time (a later `heavy next` replaces it);
-   *  it is forgotten once that agent is reserved, holds a slot, or is gone. */
+   *  moves to the head now; one not queued is handed the slot when it frees, or at once when it is free
+   *  now (handNamed, 1.1.108: `reserved` in the answer), and goes to the head if it asks before that.
+   *  One name at a time (a later `heavy next` replaces it); it is forgotten once that agent is
+   *  reserved, holds a slot, or is gone. */
   next(agentId: string, to: string): HeavyNextAnswer {
     to = to.slice(0, 80);
     const i = this.waiters.findIndex((w) => w.agentId === to);
@@ -3457,6 +3503,10 @@ export class HeavyJobLock {
     this.nextUp = to;
     this.nextAt = this.now();
     if (i > 0) { this.waiters.unshift(...this.waiters.splice(i, 1)); this.changed(); }
+    // FLOOR-INBOX-HOLD-DELAYS-BENCH-GO (1.1.108): so does a slot free now for a name that is not queued.
+    if (!queued) this.grant();
+    const reserved = !queued && this.reservations.has(to);
+    if (reserved) return { state: 'next', to, queued, reserved };
     // A slot free now (the named agent waited behind an exclusive head) goes to it at once.
     if (queued) this.grant();
     return { state: 'next', to, queued };

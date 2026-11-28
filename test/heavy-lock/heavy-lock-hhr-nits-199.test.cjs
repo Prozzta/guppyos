@@ -98,6 +98,9 @@ K.nameExpires = async (M = HJ) => {
   await y.l.lease('jim', { op: 'next', to: 'creed' });
   y.tick(M.HEAVY_TTL_MS / 2);
   await y.l.lease('jim', { op: 'next', to: 'creed' });
+  // jim's job is still running (a second call of his moves the hold's clock): a hold that ended here
+  // would hand the freed slot to the named agent (1.1.108) and spend the name.
+  y.l.acquire('jim', H, 'sh pack.sh', 'j2', false);
   y.tick(M.HEAVY_TTL_MS / 2 + 1);
   assert.equal((await y.status('god')).next, 'creed', 'NAMING AGAIN RESTARTS THE HOUR');
   y.tick(M.HEAVY_TTL_MS / 2);
@@ -253,7 +256,7 @@ test('E2E: a refused `heavy next` (unknown name, not a holder, self) exits 1 ove
   assert.equal((await cli(['next', 'jim'], { HIVE_LEDGER_URL: b.url('jim') })).code, 1, 'self: exits 1');
   const ok = await cli(['next', 'creed'], { HIVE_LEDGER_URL: b.url('jim') });
   assert.equal(ok.code, 0, ok.err);
-  assert.equal(ok.out, 'heavy: the next freed slot goes to creed (not queued yet: it goes to the head when it next asks)\n');
+  assert.equal(ok.out, 'heavy: the next freed slot goes to creed (not queued: when the slot frees it is reserved for it and it is told)\n');
   assert.equal((await cli(['status'], { HIVE_LEDGER_URL: b.url('god') })).code, 0, 'status exits 0');
 });
 

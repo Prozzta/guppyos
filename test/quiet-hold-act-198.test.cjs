@@ -108,6 +108,44 @@ K.resultAsInformWakes = (cls = real.cls) => {
 };
 test('c: an inform from an agent the recipient has an open ask to is the result and wakes, unless it names another card', () => K.resultAsInformWakes());
 
+/**
+ * FLOOR-INBOX-HOLD-DELAYS-BENCH-GO (1.1.108), the 2026-11-25 floor: creed is doing MD-NOSEAMS and
+ * has asked god nothing; Jim's static PASS on that card sits in god's ledger. God's bench GO went
+ * out as an agree in_reply_to JIM's mail (5239f2) and was held for 30 min.
+ */
+const BOARD = [
+  { id: 'MD-NOSEAMS', assignee: 'creed', status: 'doing' },
+  { id: 'OWN-PROCS', assignee: 'creed', status: 'blocked' },
+  { id: 'LAG-197', assignee: 'creed', status: 'todo' },
+  { id: 'REMOVEJAIL', assignee: 'creed', status: 'done' },
+  { id: 'RIG-176', assignee: 'andy', status: 'doing' }
+];
+K.goOnMyDoingCardWakes = (cls = real.cls) => {
+  const docs = { god: [inform('jim-pass', { from: 'jim', cardId: 'MD-NOSEAMS' })] };
+  let boardReads = 0;
+  const L = { entries: (id) => docs[id] ?? [], working: (id) => { boardReads++; return cls.workingCards(BOARD, id); } };
+  const go = (id, over = {}) => inform(id, { act: 'agree', inReplyTo: 'jim-pass', ...over });
+  const g1 = go('g1', { cardId: 'MD-NOSEAMS' });
+  assert.equal(cls.solicitedQuietMail(g1, 'creed', L), true, 'A GO ON THE CARD I AM DOING WAKES ME');
+  assert.equal(cls.mailWakeClass(g1, 'inject', (e) => cls.solicitedQuietMail(e, 'creed', L)), 'wake', 'THE 5239F2 GO IS CLASSED AS A WAKE');
+  assert.equal(cls.quietHolds([g1], 'inject', HOLD, NOW, (e) => cls.solicitedQuietMail(e, 'creed', L)).size, 0, 'THE 5239F2 GO IS NOT HELD');
+  assert.equal(cls.solicitedQuietMail(go('g2', { cardId: 'md-noseams' }), 'creed', L), true, 'THE CARD ID IS MATCHED WITHOUT CASE');
+  assert.equal(cls.solicitedQuietMail(go('g3', { cardId: 'RIG-176' }), 'creed', L), false, 'A CARD ANOTHER AGENT IS DOING STAYS QUIET');
+  for (const card of ['OWN-PROCS', 'LAG-197', 'REMOVEJAIL']) {
+    assert.equal(cls.solicitedQuietMail(go(`n-${card}`, { cardId: card }), 'creed', L), false, `A CARD OF MINE THAT IS NOT DOING STAYS QUIET (${card})`);
+  }
+  assert.equal(cls.solicitedQuietMail(go('g4'), 'creed', L), false, 'A GO THAT NAMES NO CARD STAYS QUIET');
+  assert.equal(cls.solicitedQuietMail(g1, 'creed', { entries: L.entries }), false, 'WITHOUT A BOARD NO CARD IS WORKED');
+  // One pass over many pending ids reads the board once per agent, as it reads each ledger once.
+  boardReads = 0;
+  const index = cls.indexWakeLedgers(L);
+  for (let i = 0; i < 5; i++) cls.solicitedQuietMail(go(`p${i}`, { cardId: 'RIG-176' }), 'creed', index);
+  assert.equal(boardReads, 1, 'ONE BOARD READ PER AGENT PER PASS');
+  const boom = { entries: L.entries, working: () => { throw new Error('tasks.json unreadable'); } };
+  assert.equal(cls.mailWakeClass(go('g5', { cardId: 'RIG-176' }), 'inject', (e) => cls.solicitedQuietMail(e, 'creed', boom)), 'wake', 'AN UNREADABLE BOARD WAKES');
+};
+test('d: an inform/agree naming a card the recipient is DOING on the board wakes it, whoever sent it and whatever it replies to (the 5239f2 bench GO)', () => K.goOnMyDoingCardWakes());
+
 test('fail open: a ledger reader that throws wakes (mailWakeClass catches it, as for B1)', () => {
   const boom = { entries: () => { throw new Error('ledger unreadable'); } };
   assert.equal(real.cls.mailWakeClass(inform('x1'), 'inject', (e) => real.cls.solicitedQuietMail(e, 'speck', boom)), 'wake');
@@ -324,16 +362,16 @@ test('LAG-QUIET-PENDING-108: a reader that throws is not cached: every id of the
 
 test('main: quietUntil asks solicitedQuietMail over every ledger (the asks this agent sent sit in the receivers\' ledgers)', () => {
   const index = readSource('src/main/index.ts');
-  assert.match(index, /import \{ indexWakeLedgers, quietHolds, quietMailHoldMs, solicitedQuietMail \} from '\.\.\/shared\/mailWakeClass';/);
+  assert.match(index, /import \{ indexWakeLedgers, quietHolds, quietMailHoldMs, solicitedQuietMail, workingCards \} from '\.\.\/shared\/mailWakeClass';/);
   // LAG-QUIET-PENDING-108: ONE index, made before the pass, outside the per-id callback.
-  assert.match(index, /const ledgers = indexWakeLedgers\(\{ entries: \(holder: string\) => Object\.values\(hive\.mail\.ledger\(holder\)\.entries\) \}\);\n      return quietHolds\(ids\.map\(\(id\) => entries\[id\]\)\.filter\(\(e\) => !!e\), hookServer\.mailChannel\(agentId\)\.mode, holdMs, now,\n        \(e\) => solicitedQuietMail\(e, agentId, ledgers\)\);/);
+  assert.match(index, /const ledgers = indexWakeLedgers\(\{ entries: \(holder: string\) => Object\.values\(hive\.mail\.ledger\(holder\)\.entries\), working: \(id: string\) => workingCards\(\(hive\.tasks\(\) as \{ tasks\?: HiveTask\[\] \}\)\.tasks, id\) \}\);\n      return quietHolds\(ids\.map\(\(id\) => entries\[id\]\)\.filter\(\(e\) => !!e\), hookServer\.mailChannel\(agentId\)\.mode, holdMs, now,\n        \(e\) => solicitedQuietMail\(e, agentId, ledgers\)\);/);
   const ledger = readSource(LEDGER);
   assert.match(ledger, /\.\.\.\(msg\.to === 'broadcast' \? \{ broadcast: true \} : \{\}\),/);
   assert.match(ledger, /\.\.\.\(HUMAN_RELAY_RE\.test\(String\(msg\.subject \?\? ''\)\) \|\| \(msg\.to === 'broadcast' && typeof msg\.body === 'string' && HUMAN_RELAY_RE\.test\(msg\.body\)\) \? \{ humanRelay: true \} : \{\}\),/);
   // The rig host carries the same dep, so mail-rig-quiet-198 exercises the product wiring.
   const host = readSource('test/mail-rig/rig-host.cjs');
   assert.match(host, /\(e\) => wakeClass\.solicitedQuietMail\(e, agentId, ledgers\)\);/);
-  assert.match(host, /const ledgers = wakeClass\.indexWakeLedgers\(\{ entries: \(holder\) => Object\.values\(hive\.mail\.ledger\(holder\)\.entries\) \}\);/);
+  assert.match(host, /const ledgers = wakeClass\.indexWakeLedgers\(\{ entries: \(holder\) => Object\.values\(hive\.mail\.ledger\(holder\)\.entries\), working: \(id\) => wakeClass\.workingCards\(hive\.tasks\(\)\.tasks, id\) \}\);/);
 });
 
 // ─── MUTANT CENSUS ──────────────────────────────────────────────────────────────
@@ -397,11 +435,29 @@ const MUTANTS = [
   { name: 'c: any agent\'s inform wakes (the asker is not matched)', file: CLASS,
     edits: [['index.of(e.from).owedFrom.get(recipientId);', 'index.of(e.from).owedFrom.values().next().value;']],
     killer: 'resultAsInformWakes', dies: /AN INFORM FROM AN AGENT I ASKED NOTHING OF STAYS QUIET/ },
+  { name: 'd: mail on a card the recipient is doing is held (the 5239f2 defect)', file: CLASS,
+    edits: [['  if (e.cardId && index.working(recipientId).has(cardKey(e.cardId))) return true;\n', '']],
+    killer: 'goOnMyDoingCardWakes', dies: /A GO ON THE CARD I AM DOING WAKES ME/ },
+  { name: 'd: the card id is matched with its case', file: CLASS,
+    edits: [['const cardKey = (id: string): string => id.trim().toLowerCase();', 'const cardKey = (id: string): string => id;']],
+    killer: 'goOnMyDoingCardWakes', dies: /THE CARD ID IS MATCHED WITHOUT CASE/ },
+  { name: 'd: a card any agent is doing counts (the assignee is not read)', file: CLASS,
+    edits: [["if (c && c.assignee === agentId && c.status === 'doing'", "if (c && c.status === 'doing'"]],
+    killer: 'goOnMyDoingCardWakes', dies: /A CARD ANOTHER AGENT IS DOING STAYS QUIET/ },
+  { name: 'd: working any card solicits mail on every card', file: CLASS,
+    edits: [['index.working(recipientId).has(cardKey(e.cardId))', 'index.working(recipientId).size > 0']],
+    killer: 'goOnMyDoingCardWakes', dies: /A CARD ANOTHER AGENT IS DOING STAYS QUIET/ },
+  { name: 'd: a card merely assigned counts (the status is not read)', file: CLASS,
+    edits: [["if (c && c.assignee === agentId && c.status === 'doing'", 'if (c && c.assignee === agentId']],
+    killer: 'goOnMyDoingCardWakes', dies: /A CARD OF MINE THAT IS NOT DOING STAYS QUIET/ },
+  { name: 'd: the board is read again for every pending id', file: CLASS,
+    edits: [['    if (known) return known;\n', '']],
+    killer: 'goOnMyDoingCardWakes', dies: /ONE BOARD READ PER AGENT PER PASS/ },
   { name: '108: the index is not kept (a walk per lookup, the defect)', file: CLASS,
     edits: [['    if (have) return have;\n', '']],
     killer: 'oneWalkPerHolder', dies: /ONE LEDGER READ PER HOLDER PER PASS/ },
   { name: '108: every holder is walked up front, asked about or not', file: CLASS,
-    edits: [['  return { of, [WAKE_LEDGER_INDEX]: true } as WakeLedgerIndex;', "  for (const h of ['god', 'speck', 'mccey', 'sele']) of(h);\n  return { of, [WAKE_LEDGER_INDEX]: true } as WakeLedgerIndex;"]],
+    edits: [['  return { of, working, [WAKE_LEDGER_INDEX]: true } as WakeLedgerIndex;', "  for (const h of ['god', 'speck', 'mccey', 'sele']) of(h);\n  return { of, working, [WAKE_LEDGER_INDEX]: true } as WakeLedgerIndex;"]],
     killer: 'oneWalkPerHolder', dies: /A HOLDER NOBODY ASKS ABOUT IS NOT READ/ },
   { name: '108: an index handed in is indexed again (the brand is not read)', file: CLASS,
     edits: [['  const index = isWakeLedgerIndex(ledgers) ? ledgers : indexWakeLedgers(ledgers);', '  const index = indexWakeLedgers(isWakeLedgerIndex(ledgers) ? { entries: () => [] } : ledgers);']],
