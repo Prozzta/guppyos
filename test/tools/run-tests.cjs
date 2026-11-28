@@ -200,6 +200,19 @@ const startSlots = (env = process.env, cores = os.availableParallelism()) => {
  * temp folder never counts. { root }.
  */
 const TEMP_JAIL_PRELOAD = path.join(__dirname, 'temp-jail-preload.cjs');
+/**
+ * RUNNER-REMOVEJAIL-FOLLOWS-JUNCTIONS-ELECTRON-108: the one remove for a folder this run made (the
+ * temp jail, the start gate). Test files write in both, and a file can leave a junction there that
+ * points outside. On the Electron leg a recursive fs.rmSync deletes THROUGH a Windows junction
+ * (RUNTIME PIN, test/electron-rmsync-link-safe.test.cjs), so the run's own cleanup would empty
+ * the folder the link points at. rmTree (rm-tree.cjs: the app's fs-handle remover) removes a link
+ * as a link and never follows one. It fails closed: with no usable addon it throws, the folder
+ * stays and the run says so. Do not shorten this to a recursive rm.
+ * Pinned on both runtimes by test/runner-cleanup-link-safe-108.test.cjs.
+ */
+function removeRunDir(dir) {
+  require('./rm-tree.cjs').rmTree(dir);
+}
 function prepareTempJail({ dir = os.tmpdir() } = {}) {
   return { root: fs.mkdtempSync(path.join(dir, 'run-tests-temp-')) };
 }
@@ -321,7 +334,7 @@ function run({
   startGate = spawn === nodeSpawn && watchdog === startWatchdog ? prepareStartGate : () => null,
   // TEST-TEMP-HYGIENE: the real runs only, as for fileJob. null = no temp check.
   tempJail = spawn === nodeSpawn && watchdog === startWatchdog ? prepareTempJail : () => null,
-  removeJail = (root) => fs.rmSync(root, { recursive: true, force: true }),
+  removeJail = removeRunDir,
   log = (line) => process.stdout.write(`${line}\n`),
   err = (line) => process.stderr.write(`${line}\n`),
   // CLAIMS-PERF-LANE: the serial lane's folder (the CLI passes test/perf); absent = no lane.
@@ -411,7 +424,7 @@ function run({
   try {
     return runGated({ filters, rel, renderRel, env, gate, jail, spawn, cwd, timeoutMs, isTTY, eventsFile, readFile, removeFile, failureFile, writeFailureFile, watchdog, backstop, fileJob, log, err, perfDir, readdir, concurrency, cores });
   } finally {
-    if (gate) { try { fs.rmSync(gate.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
+    if (gate) { try { removeRunDir(gate.dir); } catch (e) { err(`[test-runner] the run's start-gate folder could not be removed (${e.code || e.message}): ${gate.dir}`); } }
     if (jail) { try { removeJail(jail.root); } catch (e) { err(`[test-runner] the run's temp folders could not be removed (${e.code || e.message}; a child still holds a file): ${jail.root} (TEST-TEMP-HYGIENE)`); } }
   }
 }
@@ -797,7 +810,7 @@ function totals(code, counts, laneState, log, failures = [], {
   return code;
 }
 
-module.exports = { psFailRows, psEventsScript, savePsEvents, startBackstop, BACKSTOP_PRELOAD, runNodeTest,endedWithoutExit, fileTimeLines, totals, prepareFileJob, pruneFileJobs, FILE_JOB_DIR, FILE_JOB_PRELOAD, fileJobStrict, jobJoinFailures, fileJobVerdict, prepareTempJail, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, cappedCores, selfJobRate, HEAVYJOB_HELPER, CPU_RATE_50_PERCENT, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, renderLaneFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
+module.exports = { psFailRows, psEventsScript, savePsEvents, startBackstop, BACKSTOP_PRELOAD, runNodeTest,endedWithoutExit, fileTimeLines, totals, prepareFileJob, pruneFileJobs, FILE_JOB_DIR, FILE_JOB_PRELOAD, fileJobStrict, jobJoinFailures, fileJobVerdict, prepareTempJail, removeRunDir, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, cappedCores, selfJobRate, HEAVYJOB_HELPER, CPU_RATE_50_PERCENT, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, renderLaneFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
 
 if (require.main === module) {
   const repoRoot = path.resolve(__dirname, '..', '..');
