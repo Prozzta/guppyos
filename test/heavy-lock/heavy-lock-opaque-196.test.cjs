@@ -141,7 +141,17 @@ K.visibleLight = async (M = HJ) => {
   // single file of the same call is a fan-out and waits (after it, see heavy-preload-short-test).
   x.alive.add(101);
   const again = await ask(x, 'a', 102, { files: ['test/a.test.cjs'] });
-  assert.equal(again.state, 'wait', 'A CALL IS CONSUMED BY ONE TEST PROCESS');
+  assert.equal(again.state, 'wait', "F-B: beside the holder the call's second process waits");
+  // HEAVY-LOCK-ADMITTED-BENCH-WHILE-HELD-108 (F-B): beside a holder the second process waits under
+  // the one-run cap even if the call is never consumed, so the consume rule is bound with nobody
+  // holding: matched again it would be light; consumed, it is one file too many and takes the slot.
+  const y = rig(M);
+  y.l.noteCall('a', 'c1', 'node --test test/a.test.cjs');
+  y.images.set(50, 'C:\\Program Files\\Git\\usr\\bin\\bash.exe');
+  assert.equal((await ask(y, 'a', 111, { files: ['test/a.test.cjs'] })).state, 'light');
+  y.alive.add(111);
+  const twice = await ask(y, 'a', 112, { files: ['test/a.test.cjs'] });
+  assert.equal(twice.state, 'held', 'A CALL IS CONSUMED BY ONE TEST PROCESS (nobody else holds)');
   x.alive.delete(101);
   x.l.noteCall('c', 'c2', 'node --test test/a.test.cjs');
   x.images.set(51, 'node.exe');
